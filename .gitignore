@@ -1,0 +1,18 @@
+# Android / Gradle
+.gradle/
+build/
+*/build/
+local.properties
+
+# IDE
+.idea/
+*.iml
+
+# Generated / local
+captures/
+.externalNativeBuild/
+.cxx/
+
+# Local model artifacts
+*.gguf
+models/
