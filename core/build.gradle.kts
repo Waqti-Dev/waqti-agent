@@ -30,5 +30,6 @@ tasks.withType<Test>().configureEach {
         events("passed", "failed", "skipped")
         showExceptions = true
         showCauses = true
+        showStandardStreams = true
     }
 }

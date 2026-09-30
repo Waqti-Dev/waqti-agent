@@ -71,6 +71,18 @@ class SearchFilesToolTest {
     }
 
     @Test
+    fun `glob in path is rejected with corrective guidance`() {
+        setupTree()
+        val result = search("""{"query":"TODO","path":"*"}""")
+        assertFalse(result.ok)
+        assertTrue(result.error!!, result.error!!.contains("glob pattern"))
+        assertTrue(result.error!!, result.error!!.contains("'include'"))
+        // A failed call must not be usable as evidence about the files.
+        assertTrue(result.error!!, result.error!!.contains("says nothing"))
+        assertFalse(result.error!!, result.error!!.contains("no matches"))
+    }
+
+    @Test
     fun `path traversal is rejected`() {
         setupTree()
         val result = search("""{"query":"root","path":".."}""")

@@ -303,6 +303,17 @@ class AgentLoopTest {
     }
 
     @Test
+    fun `system prompt forbids treating a failed tool call as evidence`() = runTest {
+        val model = FakeModelProvider(listOf(ModelResponse.Text("ok")))
+
+        AgentLoop(model, ToolRegistry(emptyList())).run("task")
+
+        val system = model.requests[0].messages[0].content
+        assertTrue(system.contains("failed tool call proves nothing"))
+        assertTrue(system.contains("call again"))
+    }
+
+    @Test
     fun `tool specs are advertised to the model`() = runTest {
         val model = FakeModelProvider(listOf(ModelResponse.Text("ok")))
 

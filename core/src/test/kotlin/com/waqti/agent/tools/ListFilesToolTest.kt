@@ -33,6 +33,15 @@ class ListFilesToolTest {
     private fun list(args: String = "{}"): ToolResult = tool.execute(JSONObject(args))
 
     @Test
+    fun `glob in path is rejected with corrective guidance`() {
+        setupTree()
+        val result = list("""{"path":"*"}""")
+        assertFalse(result.ok)
+        assertTrue(result.error!!, result.error!!.contains("glob pattern"))
+        assertTrue(result.error!!, result.error!!.contains("says nothing"))
+    }
+
+    @Test
     fun `non recursive listing shows only one level`() {
         setupTree()
         val result = list()
