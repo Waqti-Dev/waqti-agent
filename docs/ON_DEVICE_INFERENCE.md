@@ -156,3 +156,69 @@ Task 3 evidence — fresh APK built from this repository (2026-09-30, UTC):
 - Loading the library and the model inside the app process: **not tested here**
   (Task 4/5)
 
+## 4. Task 4 — first in-process load attempt: FAIL (2026-09-30)
+
+```text
+Model:            Qwen2.5-3B Q4_K_M
+Model size:       2,104,932,768 bytes
+Model SHA-256:    626b4a6678b86442240e33df819e00132d3ba7dddfe1cdc4fbb18e0a9615c62d
+                  (host == device, verified before load)
+llama.cpp rev:    a894dae (a894dae939d426954ce54bb604824f1ae918a0c5, 0.4.1-dev)
+Result:           FAIL
+Failure:          Android LMK SIGKILL during llama_model_load_from_file()
+Peak RSS:         ~1.51 GB (1,513,292 kB, LMK-reported at kill time)
+oom_score_adj:    905 (cached/background process)
+Important:        mmap was enabled (load_mode = mmap), but mmap does NOT
+                  guarantee low RSS during initialization — touched pages
+                  become resident and count toward the LMK decision.
+```
+
+Proven by that run (do not re-test): APK installation; GGUF transfer into
+app-private storage; device SHA == host SHA; correct private model path;
+debug-receiver → JNI `loadModel` invocation inside the Waqti process; llama.cpp
+parsing the real GGUF (26 KV, 435 tensors, GGUF V3); tensor creation; tokenizer
+initialization. The process was killed by Android memory management — **no**
+llama.cpp exception, **no** GGUF corruption, **no** remaining path/broadcast
+problem.
+
+### Task 4 final status: PASS (2026-09-30, after memory investigation)
+
+Root cause of the failure above: initialization ran while the process was a
+**cached process** (`oom_score_adj 905`), and llama.cpp's hardcoded prefetch
+(`llama-model.cpp:1734` `init_mappings(true,…)` → `MAP_POPULATE`,
+`llama-mmap.cpp:480`) drives load-time RSS to ≈ file size — so under system
+reclaim pressure LMK SIGKILLed us. Not a llama.cpp error, not a copy, not a
+path/broadcast problem (all ruled out, `docs/EXPERIMENTS.md` EXP-B…EXP-F).
+
+Fix = **operating rule, no code change**: model initialization must run while
+the process is foreground-important. Proven twice, same APK `27ca831f…`, same
+model (LIVE-OBSERVED):
+
+| Run | Process state | Load result | Peak RSS | adj |
+|---|---|---|---|---|
+| EXP-00 | cached (broadcast cold start) | FAIL — SIGKILL | 1,513,292 kB at kill | 905 |
+| EXP-A | MainActivity resumed | **ok, 1357 ms** | 1,908,000 kB | 0 |
+| EXP-A2 | MainActivity resumed | **ok, 1438 ms** | 2,295,632 kB | 0 |
+
+Evidence chain — all in pid 14312/23339 of `com.waqti.agent`
+(`topResumedActivity=…MainActivity`, adj 0), no external server anywhere:
+
+```text
+Waqti Android process
+  → JNI NativeRuntime.loadModel
+  → llama.cpp 0.4.1-dev ("CPU_Mapped model buffer size = 2001.74 MiB", progress 0–100%)
+  → real Qwen GGUF (sha256 626b4a66…15c62d verified before load)
+  → loadModel result: ok|1357 ms|qwen2 3B Q4_K - Medium|name=qwen2.5-3b-instruct|bytes=2104932768
+```
+
+Measured (load only): duration 1357–1438 ms; peak RSS ≤ 2,295,632 kB
+(transient, file-backed — reclaims to VmRSS 318,584 kB / PSS 272,344 kB with
+the model still held); context/KV = 0; CPU ≈ 1.37 core-seconds. First-token
+latency / generation / thermal: UNKNOWN — Task 5, not started.
+
+Operating constraint for Task 6+: load models only while the process is
+foreground-important (resumed activity; a foreground service only if a genuine
+background-load requirement ever appears — rationale in
+`docs/LESSONS_LEARNED.md`). Task 5 may start now; it must measure context /
+KV / generation memory separately from load memory.
+
