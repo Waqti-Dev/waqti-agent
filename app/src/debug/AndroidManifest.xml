@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Debug builds only: a headless entry point for driving the native runtime
+    from adb during on-device validation (Tasks 4/5). This manifest is merged
+    into debug variants exclusively, so release APKs contain no receiver.
+
+    Trade-off: the receiver must be exported for the adb shell (uid 2000) to
+    reach it; the handler itself only accepts paths inside the app's private
+    files directory, so a third party can at worst ask this debug build to
+    (re)load a model it already owns.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <application>
+        <receiver
+            android:name="com.waqti.agent.runtime.ModelLoadDebugReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.waqti.agent.runtime.action.LOAD_MODEL" />
+            </intent-filter>
+        </receiver>
+    </application>
+
+</manifest>
