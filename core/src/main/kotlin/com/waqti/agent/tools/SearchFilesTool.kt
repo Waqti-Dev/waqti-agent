@@ -56,7 +56,10 @@ class SearchFilesTool(private val workspace: Workspace) : Tool {
             return ToolResult.failure("Invalid path '$path'")
         }
 
-        if (!exists(target)) return ToolResult.failure("Path does not exist: $path")
+        if (!exists(target)) {
+            if (isGlobPath(path)) return ToolResult.failure(globInPathHelp("SearchFiles", path))
+            return ToolResult.failure("Path does not exist: $path")
+        }
         if (!Files.isReadable(target)) return ToolResult.failure("Path is not readable: $path")
 
         val includeMatcher = include?.let { pattern ->

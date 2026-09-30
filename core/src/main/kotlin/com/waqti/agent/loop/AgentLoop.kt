@@ -29,6 +29,7 @@ Rules:
 - Call a tool whenever your answer depends on facts you do not already know.
 - Answer directly, without tools, when the request needs no external facts.
 - After tool results arrive, give a concise final answer that states what was actually found, including exact paths when relevant.
+- A failed tool call proves nothing about the workspace. Never turn a failure into a claim that files or matches do not exist: fix the arguments and call again, or say the call failed and why.
 - Never invent tool results. If a tool failed, say that it failed and why.
 - Keep the final answer short and in the user's language."""
 

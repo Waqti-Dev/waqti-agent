@@ -42,7 +42,10 @@ class ListFilesTool(private val workspace: Workspace) : Tool {
             return ToolResult.failure("Invalid path '$path'")
         }
 
-        if (!exists(dir)) return ToolResult.failure("Path does not exist: $path")
+        if (!exists(dir)) {
+            if (isGlobPath(path)) return ToolResult.failure(globInPathHelp("ListFiles", path))
+            return ToolResult.failure("Path does not exist: $path")
+        }
         if (!Files.isDirectory(dir)) return ToolResult.failure("Not a directory: $path")
         if (!Files.isReadable(dir)) return ToolResult.failure("Path is not readable: $path")
 
@@ -117,6 +120,21 @@ class ListFilesTool(private val workspace: Workspace) : Tool {
 }
 
 // Shared argument helpers for filesystem tools.
+
+/**
+ * Glob metacharacters in a `path` argument almost always mean the model put a
+ * file-name pattern where a directory belongs. Failing with guidance lets the
+ * model correct itself instead of concluding that nothing exists.
+ */
+internal fun isGlobPath(path: String): Boolean =
+    path.contains('*') || path.contains('?') || path.contains('[')
+
+internal fun globInPathHelp(tool: String, path: String): String =
+    "'$path' is a glob pattern, not a path. $tool takes a directory such as '.' or 'src' in " +
+        "'path'" +
+        (if (tool == "SearchFiles") ", and file-name globs such as '*.kt' in 'include'" else "") +
+        ". No files were examined, so this result says nothing about whether they exist or match."
+
 internal fun stringArg(args: JSONObject, name: String): String =
     if (args.has(name) && !args.isNull(name)) args.optString(name).trim() else ""
 

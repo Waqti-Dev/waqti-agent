@@ -16,7 +16,12 @@ class OpenAICompatProvider(
     private val model: String,
     private val apiKey: String? = null,
     private val connectTimeoutMs: Int = 10_000,
-    private val readTimeoutMs: Int = 180_000
+    private val readTimeoutMs: Int = 180_000,
+    /**
+     * Cap on generated tokens per round. Without it a small model can ramble for
+     * minutes and burn the read timeout; answers here are meant to be short.
+     */
+    private val maxTokens: Int = 512
 ) : ModelProvider {
 
     private val endpoint = baseUrl.trim().removeSuffix("/") + "/chat/completions"
@@ -48,6 +53,7 @@ class OpenAICompatProvider(
         root.put("model", model)
         root.put("stream", false)
         root.put("temperature", 0.2)
+        root.put("max_tokens", maxTokens)
 
         val messages = JSONArray()
         for (message in request.messages) {
