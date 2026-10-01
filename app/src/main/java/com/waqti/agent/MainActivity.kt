@@ -4,12 +4,9 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.viewModels
-import androidx.compose.foundation.isSystemInDarkTheme
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.darkColorScheme
-import androidx.compose.material3.lightColorScheme
 import com.waqti.agent.ui.ChatScreen
 import com.waqti.agent.ui.ChatViewModel
+import com.waqti.agent.ui.WaqtiTheme
 
 class MainActivity : ComponentActivity() {
 
@@ -18,7 +15,9 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
-            MaterialTheme(colorScheme = if (isSystemInDarkTheme()) darkColorScheme() else lightColorScheme()) {
+            // Waqti follows the system light/dark setting; the theme supplies both
+            // schemes, so nothing here hardcodes a palette.
+            WaqtiTheme {
                 ChatScreen(viewModel = chatViewModel)
             }
         }
@@ -26,7 +25,9 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
-        // The user may grant "All files access" in system settings and come back.
+        // The user may grant "All files access" in system settings and come back,
+        // and a model may have been imported while the app was in the background.
         chatViewModel.refreshAccessFlag()
+        chatViewModel.refreshModelState()
     }
 }

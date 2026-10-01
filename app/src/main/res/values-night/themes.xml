@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <style name="Theme.Waqti" parent="android:Theme.Material.Light.NoActionBar">
+    <style name="Theme.Waqti" parent="android:Theme.Material.NoActionBar">
         <item name="android:windowBackground">@color/waqti_window_background</item>
         <item name="android:statusBarColor">@color/waqti_window_background</item>
         <item name="android:navigationBarColor">@color/waqti_window_background</item>
-        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowLightStatusBar">false</item>
     </style>
 </resources>

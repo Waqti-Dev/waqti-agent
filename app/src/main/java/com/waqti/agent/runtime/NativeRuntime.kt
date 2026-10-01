@@ -60,4 +60,26 @@ object NativeRuntime {
      * Unloads the model entirely.
      */
     external fun unloadModel(): String
+
+    /**
+     * Gets the chat template from the loaded model.
+     * Returns `ok|<template>` on success, `error|<reason>` on failure.
+     */
+    external fun getChatTemplate(): String
+
+    /**
+     * Generates text from a chat conversation using the model's chat template.
+     * Returns `ok|<gen ms>|tokens=<n>|text=<generated text>` on success,
+     * `error|<reason>` on failure.
+     *
+     * @param chatJson JSON array of messages, each with "role" and "content"
+     */
+    external fun generateChat(
+        chatJson: String,
+        nPredict: Int,
+        temperature: Float,
+        topK: Int,
+        topP: Float,
+        seed: Int
+    ): String
 }

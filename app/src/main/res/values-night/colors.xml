@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Matches the dark Compose background; the previous hardcoded white window
+         background flashed on every cold start in dark mode. -->
+    <color name="waqti_window_background">#0E1112</color>
+</resources>

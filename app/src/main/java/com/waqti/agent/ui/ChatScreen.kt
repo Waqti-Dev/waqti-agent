@@ -1,106 +1,141 @@
 package com.waqti.agent.ui
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardCapitalization
-import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
-import androidx.compose.foundation.text.selection.SelectionContainer
 
-private const val EXAMPLE_TASK = "Find all Kotlin files in the workspace containing TODO"
+/**
+ * Examples that a local instruction model can genuinely answer without running a
+ * tool, so nothing on screen implies a capability the app may not have.
+ */
+private val EXAMPLE_TASKS = listOf(
+    "Explain what a Kotlin data class is, in three sentences.",
+    "What is the difference between a value class and a data class?"
+)
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ChatScreen(viewModel: ChatViewModel = viewModel()) {
     val state by viewModel.state.collectAsState()
-    val listState = rememberLazyListState()
 
-    LaunchedEffect(state.messages.size, state.phase) {
-        val last = state.messages.lastIndex
-        if (last >= 0) listState.animateScrollToItem(last)
+    val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) viewModel.importModel(uri)
+    }
+    val requestImport = remember { { picker.launch(arrayOf("*/*")) } }
+
+    val listState = rememberLazyListState()
+    val working = state.phase == TaskPhase.WORKING
+    // Follow the conversation as it grows: new messages, and the run card while a
+    // turn is in flight.
+    LaunchedEffect(state.messages.size, state.stage) {
+        val target = listState.layoutInfo.totalItemsCount - 1
+        if (target >= 0) listState.animateScrollToItem(target)
     }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text("Waqti", fontWeight = FontWeight.SemiBold) },
-                actions = {
-                    TextButton(onClick = viewModel::openSettings) { Text("Model") }
-                }
-            )
-        },
-        bottomBar = {
-            InputBar(
-                value = state.input,
-                working = state.phase == TaskPhase.WORKING,
-                onChange = viewModel::onInputChanged,
-                onSend = viewModel::send,
-                onStop = viewModel::stop
-            )
-        }
-    ) { padding ->
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(padding)
-        ) {
-            if (state.phase == TaskPhase.WORKING) {
-                WorkingPanel(activity = state.activity, trace = state.liveTrace)
+    // The gutter is resolved once, outside the Scaffold, so the header, the
+    // conversation and the composer share one margin on every screen size instead
+    // of each region picking its own.
+    BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+        val gutter = WaqtiSpace.contentGutter(maxWidth)
+
+        Scaffold(
+            containerColor = MaterialTheme.colorScheme.background,
+            topBar = {
+                WaqtiHeader(
+                    gutter = gutter,
+                    model = state.model,
+                    stage = state.stage,
+                    onOpenModel = viewModel::openSettings
+                )
+            },
+            bottomBar = {
+                WaqtiComposer(
+                    gutter = gutter,
+                    value = state.input,
+                    onChange = viewModel::onInputChanged,
+                    onSend = viewModel::send,
+                    onStop = viewModel::stop,
+                    working = working,
+                    enabled = state.canRunTask,
+                    hint = composerHint(state)
+                )
             }
+        ) { padding ->
             LazyColumn(
                 state = listState,
-                modifier = Modifier
-                    .weight(1f)
-                    .fillMaxWidth(),
-                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp)
+                modifier = Modifier.fillMaxSize().padding(padding),
+                contentPadding = PaddingValues(horizontal = gutter, vertical = WaqtiSpace.md),
+                verticalArrangement = Arrangement.spacedBy(WaqtiSpace.messageGap)
             ) {
-                if (state.messages.isEmpty()) {
-                    item(key = "empty") {
-                        EmptyHint(onUseExample = { viewModel.onInputChanged(EXAMPLE_TASK) })
+                item(key = "lead") {
+                    MeasureBox {
+                        if (state.messages.isEmpty()) {
+                            WaqtiEmptyState(
+                                canRun = state.canRunTask,
+                                importing = state.isImporting,
+                                onImport = requestImport,
+                                onExample = viewModel::onInputChanged
+                            )
+                        }
                     }
                 }
                 items(state.messages, key = { it.id }) { message ->
-                    MessageRow(message)
+                    MeasureBox { MessageRow(message) }
+                }
+                if (working) {
+                    item(key = "run") {
+                        MeasureBox { RunCard(stage = state.stage, trace = state.liveTrace) }
+                    }
                 }
             }
         }
@@ -108,231 +143,386 @@ fun ChatScreen(viewModel: ChatViewModel = viewModel()) {
 
     val draft = state.settingsDraft
     if (state.settingsVisible && draft != null) {
-        SettingsDialog(
+        ModelSheet(
+            state = state,
             draft = draft,
-            allFilesAccessGranted = state.allFilesAccessGranted,
             onDismiss = viewModel::closeSettings,
             onFieldChange = viewModel::updateSettingsDraft,
             onSave = viewModel::saveSettings,
+            onImport = requestImport,
             onGrantAccess = viewModel::openAllFilesAccessSettings
         )
     }
 }
 
+/**
+ * Keeps a conversation item to a comfortable reading measure and centred, so a
+ * long answer on a wide screen is not one 900dp line and a phone is not stretched.
+ */
 @Composable
-private fun EmptyHint(onUseExample: () -> Unit) {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(top = 48.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(8.dp)
-    ) {
-        Text(
-            "Give Waqti a task.",
-            style = MaterialTheme.typography.titleMedium,
-            textAlign = TextAlign.Center
-        )
-        Text(
-            "It decides whether it can answer directly or needs to run a tool first.",
-            style = MaterialTheme.typography.bodyMedium,
-            textAlign = TextAlign.Center,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
-        TextButton(onClick = onUseExample) {
-            Text("Try: $EXAMPLE_TASK", textAlign = TextAlign.Center)
+private fun MeasureBox(content: @Composable () -> Unit) {
+    Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.TopCenter) {
+        Box(modifier = Modifier.widthIn(max = WaqtiSpace.measure)) { content() }
+    }
+}
+
+private fun composerHint(state: ChatUiState): String? = when {
+    state.isImporting -> {
+        val model = state.model
+        if (model is ModelUiState.Importing && model.fileName.isNotBlank()) {
+            "Importing ${model.fileName}…"
+        } else {
+            "Importing a model…"
+        }
+    }
+    !state.canRunTask -> "Import a model to give Waqti a task."
+    else -> null
+}
+
+// --- header ------------------------------------------------------------------
+
+@Composable
+private fun WaqtiHeader(gutter: Dp, model: ModelUiState, stage: RunStage, onOpenModel: () -> Unit) {
+    // The window is edge-to-edge, so the header has to inset itself. Without
+    // this the status bar overlays the top of the header: the model name was
+    // drawn under the clock and the status pill sat inside the status bar's
+    // touch region, so taps on it were consumed by the system bar and never
+    // reached onOpenModel.
+    Surface(color = MaterialTheme.colorScheme.surface) {
+        Column(modifier = Modifier.fillMaxWidth().statusBarsPadding()) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(64.dp)
+                    .padding(horizontal = gutter),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                WaqtiMark(size = 30.dp)
+                Box(modifier = Modifier.width(WaqtiSpace.md))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "Waqti",
+                        style = MaterialTheme.typography.headlineSmall,
+                        modifier = Modifier.semantics { heading() }
+                    )
+                    Text(
+                        text = when (model) {
+                            is ModelUiState.Ready -> model.fileName
+                            is ModelUiState.Importing ->
+                                if (model.fileName.isBlank()) "Importing a model" else model.fileName
+                            ModelUiState.Absent -> "No model on this device"
+                        },
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+                Box(modifier = Modifier.width(WaqtiSpace.sm))
+                StatusPill(model = model, stage = stage, onClick = onOpenModel)
+            }
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
         }
     }
 }
 
 @Composable
-private fun WorkingPanel(activity: String?, trace: List<UiTrace>) {
-    Column(
+private fun StatusPill(model: ModelUiState, stage: RunStage, onClick: () -> Unit) {
+    val spoken = statusDescription(model, stage)
+    Surface(
+        onClick = onClick,
+        color = MaterialTheme.colorScheme.surfaceContainer,
+        contentColor = MaterialTheme.colorScheme.onSurface,
+        shape = RoundedCornerShape(percent = 50),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
         modifier = Modifier
-            .fillMaxWidth()
-            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
-            .padding(horizontal = 16.dp, vertical = 10.dp),
-        verticalArrangement = Arrangement.spacedBy(6.dp)
+            .height(34.dp)
+            // The pill reads as a 34.dp chip; the minimum interactive size keeps
+            // it reachable at 48.dp without changing how it looks.
+            .minimumInteractiveComponentSize()
+            .semantics { stateDescription = "Model status: " + spoken }
     ) {
-        LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
-        Text(
-            text = activity ?: "Working…",
-            style = MaterialTheme.typography.labelLarge
-        )
-        trace.forEach { TraceLine(it) }
+        Row(
+            modifier = Modifier.padding(horizontal = WaqtiSpace.md),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            WaqtiStatusDot(model = model, stage = stage, diameter = 8.dp)
+            Box(modifier = Modifier.width(WaqtiSpace.sm))
+            Text(text = statusWord(model, stage), style = MaterialTheme.typography.labelLarge)
+        }
     }
 }
 
+// --- empty state -------------------------------------------------------------
+
 @Composable
-private fun TraceLine(trace: UiTrace) {
-    val mark = if (trace.ok) "✓" else "✗"
-    val color = if (trace.ok) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error
-    Row(verticalAlignment = Alignment.Top) {
-        Text("$mark ", color = color, style = MaterialTheme.typography.labelMedium)
+private fun WaqtiEmptyState(
+    canRun: Boolean,
+    importing: Boolean,
+    onImport: () -> Unit,
+    onExample: (String) -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = WaqtiSpace.xxl + WaqtiSpace.xl, bottom = WaqtiSpace.xl),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(WaqtiSpace.lg)
+    ) {
+        WaqtiMark(size = 54.dp)
         Text(
-            text = "${trace.name} · ${trace.durationMs} ms · ${trace.summary}",
-            color = color,
-            style = MaterialTheme.typography.labelMedium
+            text = "Give Waqti something to do.",
+            style = MaterialTheme.typography.displaySmall,
+            textAlign = TextAlign.Center,
+            modifier = Modifier.semantics { heading() }
         )
+        Text(
+            text = "Waqti answers with the model stored on this phone.",
+            style = MaterialTheme.typography.bodyLarge,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.Center
+        )
+
+        if (!canRun) {
+            WaqtiPrimaryButton(
+                text = if (importing) "Importing…" else "Import a model",
+                onClick = onImport,
+                enabled = !importing
+            )
+        } else {
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(WaqtiSpace.sm)
+            ) {
+                WaqtiSectionLabel("Try one")
+                EXAMPLE_TASKS.forEach { example ->
+                    WaqtiQuietButton(
+                        text = example,
+                        onClick = { onExample(example) },
+                        modifier = Modifier.fillMaxWidth(),
+                        // Example prompts are full sentences; clamping them to one
+                        // line ellipsized them on narrower phones, hiding what the
+                        // button actually does.
+                        maxLines = 3
+                    )
+                }
+            }
+        }
     }
 }
+
+// --- messages ----------------------------------------------------------------
 
 @Composable
 private fun MessageRow(message: ChatMessageUi) {
     if (message.isNotice) {
-        Text(
-            text = message.text,
-            modifier = Modifier.fillMaxWidth(),
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            textAlign = TextAlign.Center
-        )
+        Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+            Text(
+                text = message.text,
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center
+            )
+        }
         return
     }
 
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = if (message.fromUser) Arrangement.End else Arrangement.Start
-    ) {
-        val shape = RoundedCornerShape(
-            topStart = 16.dp,
-            topEnd = 16.dp,
-            bottomStart = if (message.fromUser) 16.dp else 4.dp,
-            bottomEnd = if (message.fromUser) 4.dp else 16.dp
-        )
-        val (container, content) = when {
-            message.isError ->
-                MaterialTheme.colorScheme.errorContainer to MaterialTheme.colorScheme.onErrorContainer
-            message.fromUser ->
-                MaterialTheme.colorScheme.primaryContainer to MaterialTheme.colorScheme.onPrimaryContainer
-            else ->
-                MaterialTheme.colorScheme.surfaceVariant to MaterialTheme.colorScheme.onSurfaceVariant
-        }
-        Surface(
-            color = container,
-            contentColor = content,
-            shape = shape,
-            modifier = Modifier.fillMaxWidth(if (message.fromUser) 0.88f else 0.95f)
-        ) {
-            Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp)) {
-                if (message.trace.isNotEmpty()) {
-                    message.trace.forEach { TraceLine(it) }
-                    Spacer(modifier = Modifier.height(6.dp))
-                }
+    if (message.fromUser) {
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+            Surface(
+                color = MaterialTheme.colorScheme.secondaryContainer,
+                contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+                shape = RoundedCornerShape(
+                    topStart = 20.dp,
+                    topEnd = 6.dp,
+                    bottomStart = 20.dp,
+                    bottomEnd = 20.dp
+                ),
+                modifier = Modifier.fillMaxWidth(0.9f)
+            ) {
                 SelectionContainer {
-                    Text(text = message.text, style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        text = message.text,
+                        style = MaterialTheme.typography.bodyLarge,
+                        fontWeight = FontWeight.Medium,
+                        modifier = Modifier.padding(horizontal = WaqtiSpace.lg, vertical = WaqtiSpace.md)
+                    )
                 }
+            }
+        }
+        return
+    }
+
+    // A Waqti answer is a reading surface, not a bubble: no fill behind the text,
+    // so long answers keep an even measure and nothing nests card inside card.
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(WaqtiSpace.sm)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            WaqtiMark(size = 18.dp)
+            Box(modifier = Modifier.width(WaqtiSpace.sm))
+            Text(
+                text = "Waqti",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.semantics { heading() }
+            )
+        }
+        if (message.trace.isNotEmpty()) {
+            WaqtiTraceCard(trace = message.trace)
+        }
+        if (message.isError) {
+            WaqtiErrorCard(message = message.text, detail = message.detail)
+        } else {
+            SelectionContainer {
+                Text(
+                    text = message.text,
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
             }
         }
     }
 }
 
+// --- live run ----------------------------------------------------------------
+
 @Composable
-private fun InputBar(
+private fun RunCard(stage: RunStage, trace: List<UiTrace>) {
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceContainerLow,
+        shape = MaterialTheme.shapes.large,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(modifier = Modifier.padding(WaqtiSpace.lg)) {
+            LinearProgressIndicator(
+                modifier = Modifier.fillMaxWidth().height(3.dp),
+                color = MaterialTheme.colorScheme.primary,
+                trackColor = MaterialTheme.colorScheme.surfaceVariant,
+                gapSize = 0.dp
+            )
+            Box(modifier = Modifier.height(WaqtiSpace.md))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                WaqtiLiveDot()
+                Box(modifier = Modifier.width(WaqtiSpace.sm))
+                Text(text = stageLabel(stage), style = MaterialTheme.typography.titleSmall)
+            }
+            if (trace.isNotEmpty()) {
+                Box(modifier = Modifier.height(WaqtiSpace.md))
+                trace.forEach { WaqtiTraceRow(it) }
+            }
+        }
+    }
+}
+
+/**
+ * Every label here is tied to an event the loop actually emits, so the run card
+ * cannot display a stage the run is not in.
+ */
+private fun stageLabel(stage: RunStage): String = when (stage) {
+    RunStage.LOADING_MODEL -> "Loading the model"
+    RunStage.GENERATING -> "Working on a reply"
+    RunStage.RUNNING_TOOL -> "Running a tool"
+    RunStage.FINISHING -> "Finishing up"
+    RunStage.IDLE -> "Working"
+}
+
+// --- composer ----------------------------------------------------------------
+
+@Composable
+private fun WaqtiComposer(
+    gutter: Dp,
     value: String,
-    working: Boolean,
     onChange: (String) -> Unit,
     onSend: () -> Unit,
-    onStop: () -> Unit
+    onStop: () -> Unit,
+    working: Boolean,
+    enabled: Boolean,
+    hint: String?
 ) {
-    Surface(tonalElevation = 3.dp) {
-        Column {
-            HorizontalDivider()
-            Row(
+    val interactive = enabled || working
+    Surface(color = MaterialTheme.colorScheme.surface) {
+        Column(modifier = Modifier.fillMaxWidth().imePadding()) {
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .imePadding()
-                    .padding(horizontal = 12.dp, vertical = 10.dp),
-                verticalAlignment = Alignment.Bottom
+                    .padding(horizontal = gutter, vertical = WaqtiSpace.md)
             ) {
-                OutlinedTextField(
-                    value = value,
-                    onValueChange = onChange,
-                    modifier = Modifier.weight(1f),
-                    placeholder = { Text("Describe a task…") },
-                    minLines = 1,
-                    maxLines = 4,
-                    keyboardOptions = KeyboardOptions(
-                        imeAction = ImeAction.Send,
-                        capitalization = KeyboardCapitalization.Sentences
+                if (hint != null) {
+                    Text(
+                        text = hint,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Box(modifier = Modifier.height(WaqtiSpace.sm))
+                }
+                Surface(
+                    color = MaterialTheme.colorScheme.surfaceContainerLow,
+                    shape = MaterialTheme.shapes.extraLarge,
+                    border = BorderStroke(
+                        width = 1.dp,
+                        color = if (interactive) {
+                            MaterialTheme.colorScheme.outline
+                        } else {
+                            MaterialTheme.colorScheme.outlineVariant
+                        }
                     ),
-                    keyboardActions = KeyboardActions(onSend = { if (!working) onSend() })
-                )
-                Spacer(modifier = Modifier.width(8.dp))
-                if (working) {
-                    FilledTonalButton(
-                        onClick = onStop,
-                        modifier = Modifier.height(52.dp)
-                    ) { Text("Stop") }
-                } else {
-                    Button(
-                        onClick = onSend,
-                        enabled = value.isNotBlank(),
-                        modifier = Modifier.height(52.dp)
-                    ) { Text("Send") }
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier.padding(
+                            start = WaqtiSpace.lg,
+                            end = WaqtiSpace.sm,
+                            top = WaqtiSpace.xs,
+                            bottom = WaqtiSpace.xs
+                        ),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        BasicTextField(
+                            value = value,
+                            onValueChange = onChange,
+                            enabled = interactive,
+                            modifier = Modifier
+                                .weight(1f)
+                                .padding(vertical = WaqtiSpace.md),
+                            textStyle = MaterialTheme.typography.bodyLarge.copy(
+                                color = MaterialTheme.colorScheme.onSurface
+                            ),
+                            cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+                            maxLines = 6,
+                            keyboardOptions = KeyboardOptions(
+                                // Once the task contains a line break the keyboard
+                                // must be able to produce one, so Send becomes Enter.
+                                imeAction = if (value.contains('\n')) ImeAction.Default else ImeAction.Send,
+                                capitalization = KeyboardCapitalization.Sentences
+                            ),
+                            keyboardActions = KeyboardActions(
+                                onSend = { if (!working && enabled) onSend() }
+                            ),
+                            decorationBox = { field ->
+                                if (value.isEmpty()) {
+                                    Text(
+                                        text = "Give Waqti a task…",
+                                        style = MaterialTheme.typography.bodyLarge,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                                field()
+                            }
+                        )
+                        Box(modifier = Modifier.width(WaqtiSpace.sm))
+                        WaqtiCircleAction(
+                            working = working,
+                            enabled = enabled && value.isNotBlank(),
+                            onSend = onSend,
+                            onStop = onStop
+                        )
+                    }
                 }
             }
         }
     }
-}
-
-@Composable
-private fun SettingsDialog(
-    draft: SettingsDraft,
-    allFilesAccessGranted: Boolean,
-    onDismiss: () -> Unit,
-    onFieldChange: ((SettingsDraft) -> SettingsDraft) -> Unit,
-    onSave: () -> Unit,
-    onGrantAccess: () -> Unit
-) {
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Model & workspace") },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedTextField(
-                    value = draft.baseUrl,
-                    onValueChange = { value -> onFieldChange { draft.copy(baseUrl = value) } },
-                    label = { Text("Endpoint base URL") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
-                OutlinedTextField(
-                    value = draft.model,
-                    onValueChange = { value -> onFieldChange { draft.copy(model = value) } },
-                    label = { Text("Model name") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
-                OutlinedTextField(
-                    value = draft.apiKey,
-                    onValueChange = { value -> onFieldChange { draft.copy(apiKey = value) } },
-                    label = { Text("API key (optional)") },
-                    singleLine = true,
-                    visualTransformation = PasswordVisualTransformation(),
-                    modifier = Modifier.fillMaxWidth()
-                )
-                OutlinedTextField(
-                    value = draft.workspacePath,
-                    onValueChange = { value -> onFieldChange { draft.copy(workspacePath = value) } },
-                    label = { Text("Workspace path") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
-                if (!allFilesAccessGranted) {
-                    Text(
-                        "This workspace needs the \"All files access\" permission.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.error
-                    )
-                    TextButton(onClick = onGrantAccess) { Text("Grant file access") }
-                }
-                draft.error?.let {
-                    Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
-                }
-            }
-        },
-        confirmButton = { TextButton(onClick = onSave) { Text("Save") } },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } }
-    )
 }
