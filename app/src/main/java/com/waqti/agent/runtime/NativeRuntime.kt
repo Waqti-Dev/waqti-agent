@@ -29,4 +29,35 @@ object NativeRuntime {
      * Blocks for the whole load — must be called off the main thread.
      */
     external fun loadModel(path: String): String
+
+    /**
+     * Creates a generation context with the loaded model.
+     * Returns `ok|<init ms>|ctx=<ctx size>|n_batch=<batch>` on success,
+     * `error|<reason>` on failure.
+     */
+    external fun createContext(nCtx: Int, nBatch: Int): String
+
+    /**
+     * Generates text from a prompt using the loaded model and context.
+     * Returns `ok|<gen ms>|tokens=<n>|text=<generated text>` on success,
+     * `error|<reason>` on failure.
+     */
+    external fun generate(
+        prompt: String,
+        nPredict: Int,
+        temperature: Float,
+        topK: Int,
+        topP: Float,
+        seed: Int
+    ): String
+
+    /**
+     * Releases the generation context (frees KV cache etc.)
+     */
+    external fun releaseContext(): String
+
+    /**
+     * Unloads the model entirely.
+     */
+    external fun unloadModel(): String
 }

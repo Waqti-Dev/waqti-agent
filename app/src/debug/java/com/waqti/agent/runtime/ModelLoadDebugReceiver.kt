@@ -13,7 +13,7 @@ import java.io.File
  *
  * ```
  * adb shell am broadcast -n com.waqti.agent/com.waqti.agent.runtime.ModelLoadDebugReceiver \
- *     --es path files/<model>.gguf
+ *     --es path <model>.gguf
  * ```
  *
  * The path is relative to the app's private files directory (absolute paths
@@ -23,8 +23,18 @@ import java.io.File
 class ModelLoadDebugReceiver : BroadcastReceiver() {
 
     override fun onReceive(context: Context, intent: Intent) {
-        if (intent.action != ACTION_LOAD_MODEL) return
+        val action = intent.action ?: return
 
+        when (action) {
+            ACTION_LOAD_MODEL -> handleLoadModel(context, intent)
+            ACTION_CREATE_CONTEXT -> handleCreateContext(intent)
+            ACTION_GENERATE -> handleGenerate(intent)
+            ACTION_RELEASE_CONTEXT -> handleReleaseContext()
+            ACTION_UNLOAD_MODEL -> handleUnloadModel()
+        }
+    }
+
+    private fun handleLoadModel(context: Context, intent: Intent) {
         val rawPath = intent.getStringExtra(EXTRA_PATH)
         if (rawPath.isNullOrBlank()) {
             Log.w(TAG, "ignored: missing string extra '$EXTRA_PATH'")
@@ -49,7 +59,6 @@ class ModelLoadDebugReceiver : BroadcastReceiver() {
                 "continuing on a background thread, receiver returns now"
         )
 
-        // Loading blocks for seconds — it must never run on the main thread.
         Thread(
             {
                 val result = try {
@@ -63,9 +72,87 @@ class ModelLoadDebugReceiver : BroadcastReceiver() {
         ).start()
     }
 
+    private fun handleCreateContext(intent: Intent) {
+        val nCtx = intent.getIntExtra(EXTRA_N_CTX, 4096)
+        val nBatch = intent.getIntExtra(EXTRA_N_BATCH, 512)
+
+        Thread(
+            {
+                val result = try {
+                    NativeRuntime.createContext(nCtx, nBatch)
+                } catch (t: Throwable) {
+                    "error|${t.javaClass.name}: ${t.message}"
+                }
+                Log.i(TAG, "createContext result: $result")
+            },
+            "waqti-create-context"
+        ).start()
+    }
+
+    private fun handleGenerate(intent: Intent) {
+        val prompt = intent.getStringExtra(EXTRA_PROMPT) ?: ""
+        val nPredict = intent.getIntExtra(EXTRA_N_PREDICT, 128)
+        val temperature = intent.getFloatExtra(EXTRA_TEMPERATURE, 0.7f)
+        val topK = intent.getIntExtra(EXTRA_TOP_K, 40)
+        val topP = intent.getFloatExtra(EXTRA_TOP_P, 0.9f)
+        val seed = intent.getIntExtra(EXTRA_SEED, 0)
+
+        Thread(
+            {
+                val result = try {
+                    NativeRuntime.generate(prompt, nPredict, temperature, topK, topP, seed)
+                } catch (t: Throwable) {
+                    "error|${t.javaClass.name}: ${t.message}"
+                }
+                Log.i(TAG, "generate result: $result")
+            },
+            "waqti-generate"
+        ).start()
+    }
+
+    private fun handleReleaseContext() {
+        Thread(
+            {
+                val result = try {
+                    NativeRuntime.releaseContext()
+                } catch (t: Throwable) {
+                    "error|${t.javaClass.name}: ${t.message}"
+                }
+                Log.i(TAG, "releaseContext result: $result")
+            },
+            "waqti-release-context"
+        ).start()
+    }
+
+    private fun handleUnloadModel() {
+        Thread(
+            {
+                val result = try {
+                    NativeRuntime.unloadModel()
+                } catch (t: Throwable) {
+                    "error|${t.javaClass.name}: ${t.message}"
+                }
+                Log.i(TAG, "unloadModel result: $result")
+            },
+            "waqti-unload-model"
+        ).start()
+    }
+
     companion object {
         const val TAG = "waqti-task4"
         const val ACTION_LOAD_MODEL = "com.waqti.agent.runtime.action.LOAD_MODEL"
+        const val ACTION_CREATE_CONTEXT = "com.waqti.agent.runtime.action.CREATE_CONTEXT"
+        const val ACTION_GENERATE = "com.waqti.agent.runtime.action.GENERATE"
+        const val ACTION_RELEASE_CONTEXT = "com.waqti.agent.runtime.action.RELEASE_CONTEXT"
+        const val ACTION_UNLOAD_MODEL = "com.waqti.agent.runtime.action.UNLOAD_MODEL"
         const val EXTRA_PATH = "path"
+        const val EXTRA_N_CTX = "n_ctx"
+        const val EXTRA_N_BATCH = "n_batch"
+        const val EXTRA_PROMPT = "prompt"
+        const val EXTRA_N_PREDICT = "n_predict"
+        const val EXTRA_TEMPERATURE = "temperature"
+        const val EXTRA_TOP_K = "top_k"
+        const val EXTRA_TOP_P = "top_p"
+        const val EXTRA_SEED = "seed"
     }
 }

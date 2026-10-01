@@ -15,7 +15,9 @@ import com.waqti.agent.loop.AgentLoop
 import com.waqti.agent.loop.AgentOutcome
 import com.waqti.agent.loop.AgentPolicy
 import com.waqti.agent.loop.ToolTrace
+import com.waqti.agent.model.LocalModelProvider
 import com.waqti.agent.model.OpenAICompatProvider
+import com.waqti.agent.runtime.NativeLocalInferenceRuntime
 import com.waqti.agent.tools.ListFilesTool
 import com.waqti.agent.tools.SearchFilesTool
 import com.waqti.agent.tools.ToolRegistry
@@ -73,11 +75,26 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
         val trace = ArrayList<UiTrace>()
         runningJob = viewModelScope.launch {
-            val provider = OpenAICompatProvider(
-                baseUrl = settings.baseUrl,
-                model = settings.model,
-                apiKey = settings.apiKey.ifBlank { null }
-            )
+            val provider = if (isLocalModel()) {
+                val runtime = NativeLocalInferenceRuntime()
+                LocalModelProvider(
+                    runtime = runtime,
+                    modelPath = settings.model,
+                    nCtx = 4096,
+                    nBatch = 512,
+                    maxTokens = 256,
+                    temperature = 0.7f,
+                    topK = 40,
+                    topP = 0.9f,
+                    seed = 0
+                )
+            } else {
+                OpenAICompatProvider(
+                    baseUrl = settings.baseUrl,
+                    model = settings.model,
+                    apiKey = settings.apiKey.ifBlank { null }
+                )
+            }
             val registry = ToolRegistry(
                 listOf(ListFilesTool(workspace), SearchFilesTool(workspace))
             )
@@ -212,6 +229,10 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         runCatching { app.startActivity(specific) }.onFailure {
             runCatching { app.startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)) }
         }
+    }
+
+    private fun isLocalModel(): Boolean {
+        return settings.baseUrl == "local"
     }
 
     // --- helpers ------------------------------------------------------------

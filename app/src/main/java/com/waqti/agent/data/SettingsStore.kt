@@ -35,9 +35,10 @@ class SettingsStore(context: Context) {
     fun defaultWorkspacePath(): String = defaultWorkspace
 
     companion object {
+        // "local" enables the on-device llama.cpp runtime.
         // llama-server started by ./start-ai exposes an OpenAI-compatible API on loopback.
-        const val DEFAULT_BASE_URL = "http://127.0.0.1:8080/v1"
-        const val DEFAULT_MODEL = "local"
+        const val DEFAULT_BASE_URL = "local"
+        const val DEFAULT_MODEL = "qwen2.5-3b-OFFICIAL-Q4_K_M.gguf"
 
         private const val KEY_BASE_URL = "base_url"
         private const val KEY_MODEL = "model"

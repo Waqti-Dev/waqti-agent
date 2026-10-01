@@ -7,6 +7,7 @@
 #include <cstring>
 #include <mutex>
 #include <string>
+#include <vector>
 
 #include <android/log.h>
 #include <llama.h>
@@ -54,6 +55,10 @@ bool log_progress(float progress, void * /*user_data*/) {
 std::mutex g_model_mutex;        // serialises load/free of the process-wide model
 llama_model *g_model = nullptr;  // the one model this process holds
 std::once_flag g_backend_once;
+
+// Context for generation (one at a time for simplicity)
+std::mutex g_ctx_mutex;
+llama_context *g_ctx = nullptr;
 
 }  // namespace
 
@@ -141,5 +146,267 @@ Java_com_waqti_agent_runtime_NativeRuntime_loadModel(JNIEnv *env, jobject /*runt
         "|name=" + (name[0] != '\0' ? name : "?") +
         "|bytes=" + std::to_string(static_cast<long long>(st.st_size));
     __android_log_print(ANDROID_LOG_INFO, LOG_TAG, "model loaded: %s", result.c_str());
+    return env->NewStringUTF(result.c_str());
+}
+
+// Creates a context for generation with the loaded model.
+// Returns a '|' separated status string:
+//   ok|<init ms>|ctx=<ctx size>|n_batch=<batch>
+//   error|<reason>
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_waqti_agent_runtime_NativeRuntime_createContext(JNIEnv *env, jobject /*runtime*/,
+                                                          jint n_ctx, jint n_batch) {
+    if (g_model == nullptr) {
+        return env->NewStringUTF("error|no model loaded");
+    }
+
+    std::lock_guard<std::mutex> guard(g_ctx_mutex);
+
+    if (g_ctx != nullptr) {
+        llama_free(g_ctx);
+        g_ctx = nullptr;
+    }
+
+    llama_context_params cparams = llama_context_default_params();
+    cparams.n_ctx = (uint32_t) n_ctx;
+    cparams.n_batch = (uint32_t) n_batch;
+    cparams.n_threads = 4;  // Conservative: device has 8 cores, leave headroom
+    cparams.n_threads_batch = 4;
+    cparams.offload_kqv = false;  // CPU only
+    cparams.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_AUTO;
+    cparams.no_perf = true;
+
+    const auto started = std::chrono::steady_clock::now();
+    llama_context *ctx = llama_init_from_model(g_model, cparams);
+    const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - started).count();
+
+    if (ctx == nullptr) {
+        const std::string result =
+            "error|llama_init_from_model returned null after " +
+            std::to_string(elapsed_ms) + " ms";
+        __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, "%s", result.c_str());
+        return env->NewStringUTF(result.c_str());
+    }
+
+    g_ctx = ctx;
+
+    const std::string result =
+        "ok|" + std::to_string(elapsed_ms) + " ms|ctx=" + std::to_string(n_ctx) +
+        "|n_batch=" + std::to_string(n_batch);
+    __android_log_print(ANDROID_LOG_INFO, LOG_TAG, "context created: %s", result.c_str());
+    return env->NewStringUTF(result.c_str());
+}
+
+// Generates text from a prompt using the loaded model and context.
+// Returns a '|' separated status string:
+//   ok|<gen ms>|text=<generated text>
+//   error|<reason>
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_waqti_agent_runtime_NativeRuntime_generate(JNIEnv *env, jobject /*runtime*/,
+                                                     jstring jprompt, jint n_predict,
+                                                     jfloat temperature, jint top_k,
+                                                     jfloat top_p, jint seed) {
+    if (g_model == nullptr) {
+        return env->NewStringUTF("error|no model loaded");
+    }
+    if (g_ctx == nullptr) {
+        return env->NewStringUTF("error|no context created");
+    }
+
+    std::lock_guard<std::mutex> guard(g_ctx_mutex);
+
+    if (jprompt == nullptr) {
+        return env->NewStringUTF("error|prompt is null");
+    }
+    const char *chars = env->GetStringUTFChars(jprompt, nullptr);
+    if (chars == nullptr) {
+        return env->NewStringUTF("error|GetStringUTFChars failed");
+    }
+    const std::string prompt(chars);
+    env->ReleaseStringUTFChars(jprompt, chars);
+
+    __android_log_print(ANDROID_LOG_INFO, LOG_TAG, "generate: prompt='%s', len=%zu", prompt.c_str(), prompt.size());
+
+    // Tokenize the prompt
+    const struct llama_vocab *vocab = llama_model_get_vocab(g_model);
+    if (vocab == nullptr) {
+        __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, "generate: failed to get vocab");
+        return env->NewStringUTF("error|failed to get vocab");
+    }
+
+    // Check vocab properties
+    int32_t n_vocab = llama_vocab_n_tokens(vocab);
+    enum llama_vocab_type vocab_type = llama_vocab_type(vocab);
+    __android_log_print(ANDROID_LOG_INFO, LOG_TAG, "generate: vocab type=%d, n_tokens=%d", vocab_type, n_vocab);
+
+    // First pass: get required token count - try without add_special first
+    int n_tokens = llama_tokenize(vocab, prompt.c_str(), prompt.size(), nullptr, 0, false, false);
+    __android_log_print(ANDROID_LOG_INFO, LOG_TAG, "generate: tokenize sizing (no special) returned %d", n_tokens);
+    if (n_tokens < 0) {
+        // Negative means buffer too small; absolute value is the required size
+        n_tokens = -n_tokens;
+        __android_log_print(ANDROID_LOG_INFO, LOG_TAG, "generate: need %d tokens (no special)", n_tokens);
+    } else {
+        // Try with add_special=true in case it's needed
+        int n_tokens_special = llama_tokenize(vocab, prompt.c_str(), prompt.size(), nullptr, 0, true, false);
+        __android_log_print(ANDROID_LOG_INFO, LOG_TAG, "generate: tokenize sizing (with special) returned %d", n_tokens_special);
+        if (n_tokens_special < 0) {
+            n_tokens_special = -n_tokens_special;
+        }
+        // Use the larger of the two (special tokens might add BOS/EOS)
+        if (n_tokens_special > n_tokens) {
+            n_tokens = n_tokens_special;
+        }
+    }
+
+    // Allocate buffer and tokenize
+    std::vector<llama_token> tokens(n_tokens);
+    int actual_tokens = llama_tokenize(vocab, prompt.c_str(), prompt.size(), tokens.data(), n_tokens, false, false);
+    __android_log_print(ANDROID_LOG_INFO, LOG_TAG, "generate: tokenize actual returned %d", actual_tokens);
+    if (actual_tokens < 0) {
+        // Buffer still too small? Try with the exact size needed
+        int needed = -actual_tokens;
+        __android_log_print(ANDROID_LOG_WARN, LOG_TAG, "generate: buffer too small, need %d, retrying", needed);
+        tokens.resize(needed);
+        actual_tokens = llama_tokenize(vocab, prompt.c_str(), prompt.size(), tokens.data(), needed, false, false);
+        if (actual_tokens < 0) {
+            __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, "generate: tokenize failed even after resize: %d", actual_tokens);
+            return env->NewStringUTF("error|tokenize failed");
+        }
+    }
+    n_tokens = actual_tokens;
+
+    // Create batch with proper logits allocation
+    llama_batch batch = llama_batch_init(n_tokens, 0, 1);
+    if (batch.logits == nullptr) {
+        __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, "generate: failed to allocate batch logits");
+        return env->NewStringUTF("error|failed to allocate batch");
+    }
+    // Copy tokens into the batch and properly initialize all fields
+    for (int i = 0; i < n_tokens; ++i) {
+        batch.token[i] = tokens[i];
+        batch.logits[i] = (i == n_tokens - 1);  // only last token needs logits
+        batch.pos[i] = i;
+        batch.n_seq_id[i] = 1;
+        batch.seq_id[i][0] = 0;
+    }
+    batch.n_tokens = n_tokens;
+
+    // Decode the prompt (prefill)
+    const auto gen_started = std::chrono::steady_clock::now();
+    int ret = llama_decode(g_ctx, batch);
+    llama_batch_free(batch);
+    if (ret != 0) {
+        const std::string result = "error|llama_decode prefill failed with code " + std::to_string(ret);
+        __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, "%s", result.c_str());
+        return env->NewStringUTF(result.c_str());
+    }
+
+    // Create sampler chain
+    llama_sampler_chain_params sparams = llama_sampler_chain_default_params();
+    llama_sampler *smpl = llama_sampler_chain_init(sparams);
+    llama_sampler_chain_add(smpl, llama_sampler_init_top_k(top_k));
+    llama_sampler_chain_add(smpl, llama_sampler_init_top_p(top_p, 1));
+    llama_sampler_chain_add(smpl, llama_sampler_init_temp(temperature));
+    llama_sampler_chain_add(smpl, llama_sampler_init_dist((uint32_t) seed));
+
+    // Generate tokens
+    std::string generated_text;
+    int n_generated = 0;
+
+    __android_log_print(ANDROID_LOG_INFO, LOG_TAG, "generate: starting generation loop, n_predict=%d", n_predict);
+
+    for (int i = 0; i < n_predict; ++i) {
+        __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, "generate: step %d, sampling...", i);
+        llama_token token = llama_sampler_sample(smpl, g_ctx, -1);
+        __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, "generate: step %d, sampled token=%d", i, token);
+        if (token == -1) {
+            __android_log_print(ANDROID_LOG_INFO, LOG_TAG, "generate: sampler returned -1, stopping");
+            break;
+        }
+        llama_sampler_accept(smpl, token);
+
+        // Check for EOS
+        if (llama_vocab_is_eog(vocab, token)) {
+            __android_log_print(ANDROID_LOG_INFO, LOG_TAG, "generate: EOS token reached, stopping");
+            break;
+        }
+
+        // Convert token to text
+        char buf[128];
+        int n_chars = llama_token_to_piece(vocab, token, buf, sizeof(buf), 0, false);
+        if (n_chars > 0) {
+            generated_text.append(buf, n_chars);
+        }
+
+        // Prepare next batch with the new token
+        llama_batch next_batch = llama_batch_init(1, 0, 1);
+        if (next_batch.logits == nullptr) {
+            __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, "generate: failed to allocate next batch logits");
+            break;
+        }
+        next_batch.token[0] = token;
+        next_batch.logits[0] = true;
+        next_batch.pos[0] = n_tokens + n_generated;  // continue from where we left off
+        next_batch.n_seq_id[0] = 1;
+        next_batch.seq_id[0][0] = 0;
+        next_batch.n_tokens = 1;
+
+        ret = llama_decode(g_ctx, next_batch);
+        llama_batch_free(next_batch);
+        if (ret != 0) {
+            __android_log_print(ANDROID_LOG_WARN, LOG_TAG, "llama_decode generation step failed: %d", ret);
+            break;
+        }
+
+        n_generated++;
+    }
+
+    llama_sampler_free(smpl);
+
+    const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - gen_started).count();
+
+    const std::string result =
+        "ok|" + std::to_string(elapsed_ms) + " ms|tokens=" + std::to_string(n_generated) +
+        "|text=" + generated_text;
+    __android_log_print(ANDROID_LOG_INFO, LOG_TAG, "generation done: %s", result.c_str());
+    return env->NewStringUTF(result.c_str());
+}
+
+// Releases the generation context (frees KV cache etc.)
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_waqti_agent_runtime_NativeRuntime_releaseContext(JNIEnv *env, jobject /*runtime*/) {
+    std::lock_guard<std::mutex> guard(g_ctx_mutex);
+
+    if (g_ctx != nullptr) {
+        llama_free(g_ctx);
+        g_ctx = nullptr;
+    }
+
+    const std::string result = "ok|context released";
+    __android_log_print(ANDROID_LOG_INFO, LOG_TAG, "%s", result.c_str());
+    return env->NewStringUTF(result.c_str());
+}
+
+// Unloads the model entirely
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_waqti_agent_runtime_NativeRuntime_unloadModel(JNIEnv *env, jobject /*runtime*/) {
+    std::lock_guard<std::mutex> guard(g_model_mutex);
+
+    // Release context first if any
+    if (g_ctx != nullptr) {
+        llama_free(g_ctx);
+        g_ctx = nullptr;
+    }
+
+    if (g_model != nullptr) {
+        llama_model_free(g_model);
+        g_model = nullptr;
+    }
+
+    const std::string result = "ok|model unloaded";
+    __android_log_print(ANDROID_LOG_INFO, LOG_TAG, "%s", result.c_str());
     return env->NewStringUTF(result.c_str());
 }
