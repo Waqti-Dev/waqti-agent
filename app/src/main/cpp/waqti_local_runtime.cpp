@@ -277,26 +277,14 @@ Java_com_waqti_agent_runtime_NativeRuntime_generate(JNIEnv *env, jobject /*runti
     }
     n_tokens = actual_tokens;
 
-    // Create batch with proper logits allocation
-    llama_batch batch = llama_batch_init(n_tokens, 0, 1);
-    if (batch.logits == nullptr) {
-        __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, "generate: failed to allocate batch logits");
-        return env->NewStringUTF("error|failed to allocate batch");
-    }
-    // Copy tokens into the batch and properly initialize all fields
-    for (int i = 0; i < n_tokens; ++i) {
-        batch.token[i] = tokens[i];
-        batch.logits[i] = (i == n_tokens - 1);  // only last token needs logits
-        batch.pos[i] = i;
-        batch.n_seq_id[i] = 1;
-        batch.seq_id[i][0] = 0;
-    }
-    batch.n_tokens = n_tokens;
+    // Create batch using official llama.cpp pattern: let llama.cpp auto-manage positions
+    // llama_batch_get_one returns pos=nullptr, logits=nullptr (defaults to last token logits)
+    llama_batch batch = llama_batch_get_one(tokens.data(), n_tokens);
+    // Note: llama_batch_get_one returns logits=nullptr which defaults to "only last token logits"
 
     // Decode the prompt (prefill)
     const auto gen_started = std::chrono::steady_clock::now();
     int ret = llama_decode(g_ctx, batch);
-    llama_batch_free(batch);
     if (ret != 0) {
         const std::string result = "error|llama_decode prefill failed with code " + std::to_string(ret);
         __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, "%s", result.c_str());
@@ -340,21 +328,11 @@ Java_com_waqti_agent_runtime_NativeRuntime_generate(JNIEnv *env, jobject /*runti
             generated_text.append(buf, n_chars);
         }
 
-        // Prepare next batch with the new token
-        llama_batch next_batch = llama_batch_init(1, 0, 1);
-        if (next_batch.logits == nullptr) {
-            __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, "generate: failed to allocate next batch logits");
-            break;
-        }
-        next_batch.token[0] = token;
-        next_batch.logits[0] = true;
-        next_batch.pos[0] = n_tokens + n_generated;  // continue from where we left off
-        next_batch.n_seq_id[0] = 1;
-        next_batch.seq_id[0][0] = 0;
-        next_batch.n_tokens = 1;
+        // Prepare next batch with the new token - use official pattern: llama_batch_get_one with pos=nullptr
+        llama_batch next_batch = llama_batch_get_one(&token, 1);
+        // llama_batch_get_one returns pos=nullptr (auto-managed), logits=nullptr (last token logits)
 
         ret = llama_decode(g_ctx, next_batch);
-        llama_batch_free(next_batch);
         if (ret != 0) {
             __android_log_print(ANDROID_LOG_WARN, LOG_TAG, "llama_decode generation step failed: %d", ret);
             break;

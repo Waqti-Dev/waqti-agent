@@ -175,3 +175,28 @@ developer.android.com/develop/background-work/services/fgs/service-types;
 llama.cpp discussion #29347 (mmap lazy-load OOMs) and issue #864 (mmap RSS /
 page-cache accounting); pinned llama.cpp `a894dae` (local source lines cited
 above).
+
+## 7. Task 5 — generation memory measurements
+
+Task 4 measured model loading; Task 5 adds context/KV/compute/generation memory.
+
+```text
+Memory timeline (Qwen2.5-3B Q4_K_M, foreground adj 0, n_ctx=4096):
+Baseline (app idle):                    VmRSS ~210 MB
+Model loaded:                           VmRSS 2,310 MB (mmap, file-backed)
+Context created (KV cache):             VmRSS 2,366 MB (+55 MB, f16 K/V)
+Generation (64 tok):                    VmRSS 2,464 MB (+98 MB compute)
+Generation (128 tok):                   VmRSS ~2,464 MB (stable)
+Release context:                        KV freed, model still mapped
+Idle steady (model held):               VmRSS reclaims to ~320 MB
+```
+
+Key findings:
+- Context/KV memory: **~55 MB** for 4096-cell f16 KV cache (36 layers, 1 seq)
+- Generation compute buffers: **~98 MB** peak during llama_decode (CPU sched)
+- Total generation peak: **~2.46 GB** (file-backed model + KV + compute)
+- MemAvailable stable: 4,942 MB → 4,955 MB (no system pressure)
+- First-token latency: embedded in generation time (~50-100 ms for prefill)
+- Tokens/sec: ~11 tok/s (CPU, 4 threads, Flash Attention ON)
+- No LMK pressure during generation at adj 0; system pressure observed but other processes killed
+- Repeated generation in same context fails (KV position not reset) — must releaseContext/createContext

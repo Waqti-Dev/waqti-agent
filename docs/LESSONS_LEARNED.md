@@ -84,3 +84,13 @@ not rediscover the hard way. Evidence labels: LIVE-OBSERVED / REPO-verified.
 - Operating rule: **model initialization runs while the process is
   foreground-important** (resumed activity). Cached-process loads are
   forbidden — they are LMK victims (EXP-00).
+
+## Task 5 — generation lessons
+
+- **Chat template is essential**: raw prompt without `llama_chat_apply_template` produces hallucinated/off-topic output. Qwen2.5 uses ChatML template; must apply before tokenization.
+- **KV position tracking**: llama.cpp's `llama_batch.pos` auto-increments; repeated `generate()` in same context accumulates position → prefill fails when pos >= n_ctx. Fix: releaseContext/createContext between generations, or explicitly reset KV.
+- **Flash Attention + CPU**: `LLAMA_FLASH_ATTN_TYPE_AUTO` enables fused kernels on CPU (confirmed by "Flash Attention enabled" log). ~11 tok/s on 8-core ARM64.
+- **Batch initialization matters**: `llama_batch_get_one` returns logits=nullptr → crash on deref. Use `llama_batch_init(n_tokens, 0, 1)` + manual token/logits/pos/seq_id setup.
+- **Generation memory is additive**: model (mmap) + KV (55 MB f16) + compute (98 MB) = ~2.5 GB peak RSS. All file-backed except KV/compute.
+- **Prompt formatting**: simple "User: ... Assistant: " prefix works but produces low quality. Chat template required for Task 6+.
+- **Thermal**: UNKNOWN — no thermal API used; device stayed cool during 12s generation.

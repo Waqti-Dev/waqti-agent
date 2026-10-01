@@ -222,3 +222,39 @@ background-load requirement ever appears — rationale in
 `docs/LESSONS_LEARNED.md`). Task 5 may start now; it must measure context /
 KV / generation memory separately from load memory.
 
+## 5. Task 5 — real local inference/generation: PASS (2026-10-01)
+
+```text
+Model:            Qwen2.5-3B Q4_K_M (same as Task 4)
+llama.cpp:        a894dae (0.4.1-dev)
+Runtime:          in-process JNI, libwaqti_local_runtime.so, arm64-v8a
+Device:           Redmi/onyx, Android 16, 8 cores, 11.5 GB RAM
+APK:              5bd6b35 sha 5bd6b35c9b5c92b791e090566632a6b1b3226f7f
+```
+
+Implemented generation pipeline:
+```text
+loadModel(path) → createContext(n_ctx=4096, n_batch=512) → generate(prompt, params)
+```
+
+Measured (LIVE-OBSERVED, foreground adj=0):
+| Stage | Duration | VmRSS delta | Notes |
+|---|---|---|---|
+| Model loaded | 1414–1632 ms | 2,310,800 kB | mmap file-backed |
+| Context created | 72–109 ms | +55 MB | KV cache (f16 K/V, 36 layers, 4096 cells) |
+| Generation (128 tok) | 5,854–11,679 ms | +98 MB | compute buffers, ~11 tok/s |
+| Generation (64 tok) | 2,986 ms | — | |
+| Release context | <1 ms | — | KV freed |
+
+Process importance: foreground activity (adj 0) required; cached process (adj 905) would be LMK victim during peak RSS.
+
+Repeated generation: first generation in context succeeds; subsequent fail (KV position tracking not reset) — workaround: releaseContext → createContext.
+
+Chat template: not yet applied (raw prompt fed directly); output quality reduced.
+
+First-token latency / generation tok/s / thermal: measured ~11 tok/s; thermal UNKNOWN.
+
+Evidence chain: `docs/EXPERIMENTS.md` EXP-5A…EXP-5E, `docs/RUNTIME_MEMORY.md` section 7.
+
+Task 5 status: **PASS** — real in-process generation proven; limitations documented for Task 6+.
+
