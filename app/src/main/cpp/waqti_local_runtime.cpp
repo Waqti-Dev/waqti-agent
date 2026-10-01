@@ -2,6 +2,7 @@
 
 #include <sys/stat.h>
 
+#include <algorithm>
 #include <cerrno>
 #include <chrono>
 #include <cstring>
@@ -749,21 +750,25 @@ Java_com_waqti_agent_runtime_NativeRuntime_generate(JNIEnv *env, jobject /*runti
                         n_tokens, (int) llama_vocab_get_add_bos(vocab),
                         (int) llama_vocab_get_add_eos(vocab));
 
-    // Create batch using official llama.cpp pattern: let llama.cpp auto-manage positions
-    // llama_batch_get_one returns pos=nullptr, logits=nullptr (defaults to last token logits)
-    llama_batch batch = llama_batch_get_one(tokens.data(), n_tokens);
-    // Note: llama_batch_get_one returns logits=nullptr which defaults to "only last token logits"
-
     // Each call is an independent completion: start from an empty KV cache
     reset_memory();
 
-    // Decode the prompt (prefill)
+    // Prefill in n_batch-sized chunks, for the same reason as generateChat():
+    // llama_decode() asserts n_tokens <= n_batch and aborts rather than
+    // returning an error. llama_batch_get_one() leaves pos=nullptr so each
+    // chunk continues at the cache's current position.
+    const int32_t n_batch = (int32_t) llama_n_batch(g_ctx);
     const auto gen_started = std::chrono::steady_clock::now();
-    int ret = llama_decode(g_ctx, batch);
-    if (ret != 0) {
-        const std::string result = "error|llama_decode prefill failed with code " + std::to_string(ret);
-        __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, "%s", result.c_str());
-        return env->NewStringUTF(result.c_str());
+    int ret = 0;
+    for (int32_t off = 0; off < n_tokens; off += n_batch) {
+        const int32_t chunk = std::min(n_batch, n_tokens - off);
+        llama_batch batch = llama_batch_get_one(tokens.data() + off, chunk);
+        ret = llama_decode(g_ctx, batch);
+        if (ret != 0) {
+            const std::string result = "error|llama_decode prefill failed with code " + std::to_string(ret);
+            __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, "%s", result.c_str());
+            return env->NewStringUTF(result.c_str());
+        }
     }
 
     // Create sampler chain
@@ -1028,14 +1033,26 @@ Java_com_waqti_agent_runtime_NativeRuntime_generateChat(JNIEnv *env, jobject /*r
     // KV cache rather than on top of the previous turn's.
     reset_memory();
 
-    llama_batch batch = llama_batch_get_one(tokens.data(), n_tokens);
-
+    // llama_decode() accepts at most n_batch tokens per call. That limit is an
+    // assert, not an error return (llama-context.cpp:
+    // GGML_ASSERT(n_tokens_all <= cparams.n_batch)), so exceeding it aborts the
+    // process instead of failing the call. A tool-enabled prompt carries the
+    // system preamble plus every tool schema and routinely runs past the
+    // configured n_batch, so the prefill is fed in n_batch-sized chunks.
+    // llama_batch_get_one() leaves pos=nullptr, so each chunk continues at the
+    // cache's current position and only the last chunk's final token holds the
+    // logits the sampler reads.
+    const int32_t n_batch = (int32_t) llama_n_batch(g_ctx);
     const auto gen_started = std::chrono::steady_clock::now();
-    int ret = llama_decode(g_ctx, batch);
-    if (ret != 0) {
-        const std::string result = "error|llama_decode prefill failed with code " + std::to_string(ret);
-        __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, "%s", result.c_str());
-        return env->NewStringUTF(result.c_str());
+    for (int32_t off = 0; off < n_tokens; off += n_batch) {
+        const int32_t chunk = std::min(n_batch, n_tokens - off);
+        llama_batch batch = llama_batch_get_one(tokens.data() + off, chunk);
+        int ret = llama_decode(g_ctx, batch);
+        if (ret != 0) {
+            const std::string result = "error|llama_decode prefill failed with code " + std::to_string(ret);
+            __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, "%s", result.c_str());
+            return env->NewStringUTF(result.c_str());
+        }
     }
 
     // Same chain llama.cpp's own common_sampler builds: top_k -> top_p -> temp
@@ -1141,6 +1158,7 @@ Java_com_waqti_agent_runtime_NativeRuntime_generateChat(JNIEnv *env, jobject /*r
             candidates.data = nullptr;
             candidates.size = 0;
             candidates.selected = -1;
+            candidates.sorted = false;
             return;
         }
         for (size_t t = 0; t < candidates_buf.size(); ++t) {
@@ -1149,6 +1167,14 @@ Java_com_waqti_agent_runtime_NativeRuntime_generateChat(JNIEnv *env, jobject /*r
         candidates.data = candidates_buf.data();
         candidates.size = (int32_t) candidates_buf.size();
         candidates.selected = -1;
+        // MUST be false. The buffer above was just rebuilt in token-id order, not
+        // logit order. top_k and top_p set `sorted` to true after they reorder it,
+        // and llama_sampler_top_k_impl() skips its sort entirely when `sorted` is
+        // already true. Leaving the stale flag set therefore made top_k truncate to
+        // the first k entries -- token ids 0, 1, 2, ... -- instead of the k highest
+        // logits, so the reply was assembled from punctuation and digit tokens
+        // (observed on device as replies like "None,500)@&357647...").
+        candidates.sorted = false;
     };
     refresh_candidates();
 
@@ -1191,6 +1217,17 @@ Java_com_waqti_agent_runtime_NativeRuntime_generateChat(JNIEnv *env, jobject /*r
                                 "generateChat: sampler returned -1, stopping");
             break;
         }
+        // Both samplers have to observe the accepted token, which is what
+        // upstream common_sampler_accept() does (common/sampling.cpp:
+        // llama_sampler_accept(gsmpl->grmr, token) then
+        // llama_sampler_accept(gsmpl->chain, token)). A lazy grammar advances
+        // its state and matches its trigger on accept; accepting only on the
+        // chain left the grammar frozen at its initial state, so it filtered
+        // every step against the wrong position and the reply decoded to
+        // punctuation garbage instead of an answer.
+        if (grmr != nullptr) {
+            llama_sampler_accept(grmr, token);
+        }
         llama_sampler_accept(smpl, token);
 
         // EOG is the generation boundary. Stop *before* rendering it, so the
@@ -1222,10 +1259,6 @@ Java_com_waqti_agent_runtime_NativeRuntime_generateChat(JNIEnv *env, jobject /*r
                                 token);
         }
 
-        if (grmr != nullptr) {
-            llama_sampler_accept(grmr, token);
-        }
-
         // The template's own additional stops (for example the end of a tool
         // call block). Checked against what was actually rendered, never by
         // searching the text for a hardcoded marker.
@@ -1241,7 +1274,7 @@ Java_com_waqti_agent_runtime_NativeRuntime_generateChat(JNIEnv *env, jobject /*r
 
         llama_batch next_batch = llama_batch_get_one(&token, 1);
 
-        ret = llama_decode(g_ctx, next_batch);
+        int ret = llama_decode(g_ctx, next_batch);
         if (ret != 0) {
             stop_reason = "decode_error";
             __android_log_print(ANDROID_LOG_WARN, LOG_TAG,
