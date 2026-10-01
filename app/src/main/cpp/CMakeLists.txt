@@ -23,7 +23,11 @@ set(LLAMA_BUILD_TESTS    OFF CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_TOOLS    OFF CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_SERVER   OFF CACHE BOOL "" FORCE)
-set(LLAMA_BUILD_COMMON   OFF CACHE BOOL "" FORCE)
+# ON: Task 7 needs common_chat_templates_apply()/common_chat_parse() so the
+# model's OWN chat template drives tool formatting and tool-call parsing. Those
+# live in llama-common; we do not reimplement a parser. Nothing from common is
+# executed except the chat entry points (no download/HTTP code is reachable).
+set(LLAMA_BUILD_COMMON   ON  CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_APP      OFF CACHE BOOL "" FORCE)
 set(LLAMA_TOOLS_INSTALL  OFF CACHE BOOL "" FORCE)
 set(LLAMA_TESTS_INSTALL  OFF CACHE BOOL "" FORCE)
@@ -41,4 +45,4 @@ add_subdirectory("${LLAMA_CPP_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/llama_cpp" EXCL
 # The only JNI-visible target: a single .so exposing llama.cpp to Kotlin.
 add_library(waqti_local_runtime SHARED waqti_local_runtime.cpp)
 target_include_directories(waqti_local_runtime PRIVATE "${LLAMA_CPP_DIR}/include")
-target_link_libraries(waqti_local_runtime PRIVATE llama android log)
+target_link_libraries(waqti_local_runtime PRIVATE llama llama-common android log)

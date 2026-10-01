@@ -8,7 +8,7 @@ import java.io.File
 
 /**
  * Debug-only, headless trigger for the in-process runtime, so on-device
- * validation (Tasks 4/5) needs no UI: it belongs to `src/debug` and is not
+ * validation (Tasks 4/5/6) needs no UI: it belongs to `src/debug` and is not
  * compiled into release builds at all.
  *
  * ```
@@ -29,6 +29,8 @@ class ModelLoadDebugReceiver : BroadcastReceiver() {
             ACTION_LOAD_MODEL -> handleLoadModel(context, intent)
             ACTION_CREATE_CONTEXT -> handleCreateContext(intent)
             ACTION_GENERATE -> handleGenerate(intent)
+            ACTION_GENERATE_CHAT -> handleGenerateChat(context, intent)
+            ACTION_GET_CHAT_TEMPLATE -> handleGetChatTemplate()
             ACTION_RELEASE_CONTEXT -> handleReleaseContext()
             ACTION_UNLOAD_MODEL -> handleUnloadModel()
         }
@@ -110,6 +112,75 @@ class ModelLoadDebugReceiver : BroadcastReceiver() {
         ).start()
     }
 
+    /**
+     * Chat JSON cannot be passed straight through `adb shell am broadcast --es`:
+     * the shell eats the double quotes, so the receiver used to see a mangled
+     * string (e.g. 12 bytes instead of 19). Base64 is a single shell-safe word,
+     * so it is the supported way to drive multi-turn chat validation.
+     */
+    private fun resolveChatJson(context: Context, intent: Intent): String? {
+        intent.getStringExtra(EXTRA_CHAT_JSON_B64)?.let { b64 ->
+            return try {
+                String(android.util.Base64.decode(b64, android.util.Base64.DEFAULT))
+            } catch (t: Throwable) {
+                Log.w(TAG, "ignored: $EXTRA_CHAT_JSON_B64 is not valid base64: ${t.message}")
+                null
+            }
+        }
+        intent.getStringExtra(EXTRA_CHAT_JSON)?.let {
+            if (it.isNotBlank()) return it
+        }
+        val file = intent.getStringExtra(EXTRA_CHAT_FILE) ?: return null
+        val filesDir = context.filesDir.canonicalFile
+        val target = (if (file.startsWith("/")) File(file) else File(filesDir, file)).canonicalFile
+        if (!target.path.startsWith(filesDir.path + File.separator) || !target.isFile) {
+            Log.w(TAG, "refused: $EXTRA_CHAT_FILE is not a readable file inside app storage")
+            return null
+        }
+        return target.readText()
+    }
+
+    private fun handleGenerateChat(context: Context, intent: Intent) {
+        val chatJson = resolveChatJson(context, intent)
+        if (chatJson == null) {
+            Log.w(TAG, "ignored: need one of '$EXTRA_CHAT_JSON_B64', '$EXTRA_CHAT_JSON', '$EXTRA_CHAT_FILE'")
+            return
+        }
+        val nPredict = intent.getIntExtra(EXTRA_N_PREDICT, 128)
+        val temperature = intent.getFloatExtra(EXTRA_TEMPERATURE, 0.7f)
+        val topK = intent.getIntExtra(EXTRA_TOP_K, 40)
+        val topP = intent.getFloatExtra(EXTRA_TOP_P, 0.9f)
+        val seed = intent.getIntExtra(EXTRA_SEED, 0)
+
+        Log.i(TAG, "generateChat request: ${chatJson.length} json bytes, n_predict=$nPredict")
+
+        Thread(
+            {
+                val result = try {
+                    NativeRuntime.generateChat(chatJson, nPredict, temperature, topK, topP, seed)
+                } catch (t: Throwable) {
+                    "error|${t.javaClass.name}: ${t.message}"
+                }
+                Log.i(TAG, "generateChat result: $result")
+            },
+            "waqti-generate-chat"
+        ).start()
+    }
+
+    private fun handleGetChatTemplate() {
+        Thread(
+            {
+                val result = try {
+                    NativeRuntime.getChatTemplate()
+                } catch (t: Throwable) {
+                    "error|${t.javaClass.name}: ${t.message}"
+                }
+                Log.i(TAG, "getChatTemplate result: $result")
+            },
+            "waqti-get-chat-template"
+        ).start()
+    }
+
     private fun handleReleaseContext() {
         Thread(
             {
@@ -143,12 +214,17 @@ class ModelLoadDebugReceiver : BroadcastReceiver() {
         const val ACTION_LOAD_MODEL = "com.waqti.agent.runtime.action.LOAD_MODEL"
         const val ACTION_CREATE_CONTEXT = "com.waqti.agent.runtime.action.CREATE_CONTEXT"
         const val ACTION_GENERATE = "com.waqti.agent.runtime.action.GENERATE"
+        const val ACTION_GENERATE_CHAT = "com.waqti.agent.runtime.action.GENERATE_CHAT"
+        const val ACTION_GET_CHAT_TEMPLATE = "com.waqti.agent.runtime.action.GET_CHAT_TEMPLATE"
         const val ACTION_RELEASE_CONTEXT = "com.waqti.agent.runtime.action.RELEASE_CONTEXT"
         const val ACTION_UNLOAD_MODEL = "com.waqti.agent.runtime.action.UNLOAD_MODEL"
         const val EXTRA_PATH = "path"
         const val EXTRA_N_CTX = "n_ctx"
         const val EXTRA_N_BATCH = "n_batch"
         const val EXTRA_PROMPT = "prompt"
+        const val EXTRA_CHAT_JSON = "chat_json"
+        const val EXTRA_CHAT_JSON_B64 = "chat_json_b64"
+        const val EXTRA_CHAT_FILE = "chat_file"
         const val EXTRA_N_PREDICT = "n_predict"
         const val EXTRA_TEMPERATURE = "temperature"
         const val EXTRA_TOP_K = "top_k"
