@@ -1,8 +1,9 @@
 # On-device inference — runtime boundary and runtime selection
 
-Status: Task 1 (boundary) and Task 2 (runtime research) of the on-device
-inference migration. Research only — no llama.cpp code exists in this
-repository yet.
+Status: Tasks 1–6 done (boundary, runtime research, in-process GGUF load,
+generation, chat template + generation control). All six are **PASS** on a real
+device. Per-task detail lives in its own section below; the experiment log is
+`docs/EXPERIMENTS.md`.
 
 ## 1. Runtime boundary (Task 1)
 
@@ -257,4 +258,183 @@ First-token latency / generation tok/s / thermal: measured ~11 tok/s; thermal UN
 Evidence chain: `docs/EXPERIMENTS.md` EXP-5A…EXP-5E, `docs/RUNTIME_MEMORY.md` section 7.
 
 Task 5 status: **PASS** — real in-process generation proven; limitations documented for Task 6+.
+
+## 6. Task 6 — chat template + generation control: PASS (2026-10-01)
+
+```text
+Source commit:    d95561a6 (Task 5) + uncommitted Task 6 working tree
+Build:            ./gradlew :app:assembleDebug
+APK:              35,487,461 bytes  sha256 375848189d787abf7e9a15336f9ad34e98b241bedce226e2a8b47cfc9785c88f
+Install:          adb install -r -t app/build/outputs/apk/debug/app-debug.apk → Success
+Model:            Qwen2.5-3B Q4_K_M, 2,104,932,768 bytes (device == host, verified in Task 4)
+llama.cpp:        a894dae939d426954ce54bb604824f1ae918a0c5 (0.4.1-dev), pinned, unmodified
+Device:           Redmi/onyx, Android 16, arm64, 8 cores, 11.5 GB RAM
+Evidence:         LIVE-OBSERVED (device logcat `waqti-native` / `waqti-task4`, pid = Waqti process)
+Host tests:       ./gradlew :core:test → 71 tests, 70 PASSED, 1 SKIPPED, 0 FAILED
+```
+
+### 6.1 Pipeline
+
+```text
+Waqti UI → ChatViewModel → AgentLoop → LocalModelProvider
+        → LocalInferenceRuntime → NativeRuntime.generateChat (JNI)
+        → llama_model_chat_template + llama_chat_apply_template
+        → llama_tokenize → llama_decode → sampler loop → llama_token_to_piece
+        → text → Compose UI
+```
+
+No HTTP, no localhost, no bundled server, no ADB reverse, no external
+`llama-server`. Every token below was produced inside the Waqti process.
+
+### 6.2 The defect this task actually fixed
+
+The reported symptom was a literal end-of-turn marker appearing in generated
+text. Comparing our code against the pinned llama.cpp API gave the real cause —
+**not** the detokenizer.
+
+`llama_tokenize(..., add_special, parse_special)` was called with
+`(false, false)`. In `src/llama-vocab.cpp` `tokenizer_st_partition()`:
+
+```cpp
+if (!parse_special && (data.attr & (LLAMA_TOKEN_ATTR_CONTROL | LLAMA_TOKEN_ATTR_UNKNOWN))) {
+    // Ignore control and unknown tokens when parse_special == false
+    continue;
+}
+```
+
+So the ChatML markers in the formatted prompt were **not** mapped to the model's
+own control ids; they were split into ordinary text pieces. The model therefore
+saw a prompt that looked nothing like its training distribution and answered by
+writing the marker out as literal text.
+
+Every llama.cpp example tokenizes the way `common_tokenize` does, with
+`add_special=true, parse_special=true` (`examples/embedding/embedding.cpp:195`,
+`common/chat.cpp:149`, `common/sampling.cpp:282`). We now do the same.
+`add_special=true` is safe for this GGUF: `tokenizer.ggml.add_bos_token=False`
+and no `add_eos_token` key, so `llama_vocab_get_add_bos/get_add_eos` are both 0 —
+verified LIVE-OBSERVED in the log line
+`prompt tokenized to 14 tokens (add_bos=0 add_eos=0)`.
+
+Decisive LIVE-OBSERVED proof (prompt ids logged before prefill):
+
+```text
+formatted prompt (84 bytes) = <|im_start|>user\nHello, introduce yourself briefly.<|im_end|>\n<|im_start|>assistant\n
+prompt ids = 151644 872 198 9707 11 19131 6133 26753 13 151645 198 151644 77091 198
+control tokens in prompt = 3
+EOG id=151645 piece=<|im_end|> after 29 token(s)
+```
+
+`151644` / `151645` are the real `<|im_start|>` / `<|im_end|>` ids (confirmed
+against the GGUF token table), and the EOG token is detected and **not**
+rendered.
+
+### 6.3 Generation control
+
+| Requirement | Implementation | Evidence |
+|---|---|---|
+| nPredict is a hard upper bound | `for (i = 0; i < n_predict; ++i)`; loop cannot exceed it | `tokens=8 stop=n_predict` for `n_predict=8`; `tokens=4 stop=n_predict` for 4 |
+| Clean EOS/EOG, no control-token leakage | `llama_vocab_is_eog()` breaks **before** rendering; `llama_token_to_piece(..., special=false)` returns 0 chars for CONTROL/UNKNOWN attrs | 31 rendered UI text nodes scanned: **no** `<|`, `|>`, `im_start`, `im_end`, or `\x` escapes |
+| Stop reason is observable | `ok|<ms> ms\|tokens=<n>\|stop=<eog\|n_predict\|sampler_eof\|decode_error>\|text=<text>` | every result line in §6.4 |
+| Shared vs fresh conversation | the transcript in `ModelRequest.messages` *is* the context: the whole thing is formatted and prefilled every call and the KV cache is reset before each prefill | see §6.5 |
+
+`llama_detokenize(..., remove_special)` is **not** the knob here: it applies to
+a whole token array, while generation is incremental. `llama_token_to_piece`'s
+`special` argument is the correct one for the incremental path.
+
+### 6.4 Device results (LIVE-OBSERVED, headless debug receiver, fresh app start)
+
+| Test | n_predict | Result |
+|---|---|---|
+| A basic conversation | 64 | `ok\|3783 ms\|tokens=29\|stop=eog\|text=Hello! I'm an artificial intelligence here to assist you with any information or tasks you might need help with. How can I assist you today?` |
+| A repeated (determinism) | 64 | byte-identical to A — proves no state carried between calls |
+| B instruction following ("exactly three words") | 48 | `tokens=1\|stop=eog\|text=Paris` |
+| C continuity (passcode stated in turn 1) | 32 | `tokens=11\|stop=eog\|text=The secret passcode is 7391.` |
+| D fresh context (same question, no history) | 32 | cannot produce 7391 — the difference is the history, not the plumbing |
+| E generation limit | 8 | `tokens=8\|stop=n_predict` |
+| E2 generation limit | 4 | `tokens=4\|stop=n_predict` |
+| reload cycle | 16 | release → unload → `createContext` = `error\|no model loaded` → reload → `tokens=1\|stop=eog\|text=OK` |
+
+Task 5 regression on the same APK — plain `generate()` (no template), which is
+the path Task 5 validated:
+
+```text
+generate result: ok|1541 ms|tokens=12|stop=n_predict|text= = "Paris"
+generate result: ok|840 ms |tokens=5 |stop=n_predict|text= = "Paris"
+```
+
+### 6.5 Real UI validation (LIVE-OBSERVED, `MainActivity` + `uiautomator`)
+
+Settings were reset so the app uses its own defaults (`base_url=local`,
+`model=qwen2.5-3b-OFFICIAL-Q4_K_M.gguf`). Two turns typed with `adb shell input`
+and sent with the on-screen Send button; the rendered conversation was read back
+from the accessibility tree:
+
+```text
+[232,432][1189,578]   'My name is Sara and my favourite number is 42. Just acknowledge.'
+[91,677][589,750]     'Acknowledged, Sara.'
+[232,849][1189,995]   'What is my name and my favourite number? Answer in one short sentence.'
+[91,1094][1130,1240]  'Your name is Sara and your favourite number is 42.'
+```
+
+Scan of every rendered text node for control-token / escape leakage:
+**NONE**. Screenshots and the dump are in `evidence/`
+(`task6_ui_final.png`, `task6_ui_final_uiautomator.xml`).
+
+An independent passcode variant was also run through the UI
+(`The secret passcode is 7391.` → `Acknowledged.` → `Repeat the secret passcode
+exactly.` → `7391`), reproduced twice.
+
+### 6.6 Defects found and fixed on the UI path
+
+These were only reachable through the real app, not the debug receiver:
+
+1. **Settings store a model name, not a path.** `SettingsStore.DEFAULT_MODEL`
+   is a bare filename, and it was handed straight to `loadModel()`, which
+   `stat()`s it — resolved against the process working directory, so it always
+   failed with `error|cannot stat file`. `ChatViewModel.resolveLocalModelPath()`
+   now resolves a bare name inside the app's private files directory
+   (LIVE-OBSERVED load path: `/data/user/0/com.waqti.agent/files/qwen2.5-3b-OFFICIAL-Q4_K_M.gguf`).
+2. **The KV cache was never reset.** `llama_batch_get_one` positions continue
+   from `memory->seq_pos_max()+1`, so every call re-prefilled the entire history
+   on top of the previous call's KV. Fixed with `llama_memory_clear(
+   llama_get_memory(ctx), true)` before each prefill — the same call
+   `examples/embedding` and `common.cpp` make. Proven by the byte-identical
+   repeat of test A.
+3. **The UI never sent earlier turns.** `AgentLoop.run(task)` built a fresh
+   `SYSTEM + task` transcript every time, so a follow-up question could not refer
+   to anything said earlier. `run(task, history = emptyList())` now accepts the
+   turns the UI is already showing; the default keeps every existing caller and
+   test unchanged. `MAX_HISTORY_MESSAGES = 24` bounds a long chat, and
+   SYSTEM/TOOL/blank turns are dropped from the supplied history.
+   Regression test: `core/src/test/kotlin/com/.../AgentLoopHistoryTest.kt` (5 tests).
+4. **The JNI status string was ambiguous.** `ok|…|tokens=n|text=…` was parsed
+   with `split('|')`, which silently truncated any answer containing a pipe.
+   `text` is now the last field and is taken with `substringAfter("|text=")`.
+5. **`llama_chat_message` only borrows `const char *`.** The old parser built
+   each message from loop-local `std::string`s whose storage died at the end of
+   the iteration, leaving dangling pointers — undefined behaviour that happened
+   to work. Roles and contents are now collected into owning `std::vector`s and
+   the message array is built afterwards. The same rewrite added correct
+   `\uXXXX` / surrogate-pair handling and proper `"` escaping.
+6. **Dead code removed**: `LocalModelProvider.startFreshConversation()` had no
+   caller and, after (2), no distinct meaning — a fresh conversation is simply a
+   request whose history is empty.
+
+### 6.7 Known limitations (unchanged, still open)
+
+- `LocalModelProvider` returns `ModelResponse.Text` only. It does **not** map
+  generated text to `ModelResponse.Calls`, so the agent's tool calls are not
+  driven by the local model yet — this is the risk recorded in §1 and remains
+  open for a later task. The UI evidence above shows the loop terminating on the
+  model's plain-text turn.
+- Generation quality at Q4_K_M with `temperature=0.7` is uneven. Recall of an
+  earlier turn is reliable for concrete facts ("passcode 7391") and unreliable
+  for weakly-worded preferences ("favourite colour is teal" was sometimes not
+  recalled). This is model capability, not a runtime defect: the prompt for
+  those turns is logged and provably contains the history.
+- Throughput is unchanged from Task 5 (~10–14 tok/s; 29 tokens in 3.8 s here).
+  Long prompts cost more: the UI system prompt is ~940 bytes and a turn took
+  17–23 s.
+- `AgentLiveE2ETest` is still `SKIPPED`: it targets an external OpenAI-compatible
+  endpoint and is deliberately never used as on-device evidence.
 

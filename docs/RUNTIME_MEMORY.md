@@ -200,3 +200,38 @@ Key findings:
 - Tokens/sec: ~11 tok/s (CPU, 4 threads, Flash Attention ON)
 - No LMK pressure during generation at adj 0; system pressure observed but other processes killed
 - Repeated generation in same context fails (KV position not reset) — must releaseContext/createContext
+
+## 8. Task 6 — repeated generation with a per-call KV reset (2026-10-01)
+
+Task 6 added `llama_memory_clear(llama_get_memory(ctx), true)` before every
+prefill, because the formatted prompt always contains the whole transcript.
+Without the reset, `llama_batch_get_one` continued from
+`memory->seq_pos_max() + 1` and each call re-prefilled the history on top of the
+previous call's KV.
+
+That raises a new question: does clearing the KV on every call leak or fragment?
+
+Method — same APK as Task 6 (`sha256 375848189d78…`), model loaded and
+`n_ctx=4096`, `n_batch=512`, 6 sequential `generateChat` calls
+(`n_predict=8`, `temperature=0.0`), `dumpsys meminfo com.waqti.agent` sampled
+after each call:
+
+| Point | TOTAL PSS (kB) | Native Heap (kB) |
+|---|---|---|
+| model loaded, context created | 2,435,559 | 249,798 |
+| after call 1 | 2,416,837 | 251,422 |
+| after call 2 | 2,416,833 | 251,438 |
+| after call 3 | 2,417,085 | 251,730 |
+| after call 4 | 2,416,821 | 251,462 |
+| after call 5 | 2,416,833 | 251,470 |
+| after call 6 | 2,416,697 | 251,342 |
+
+Result: **PASS** — native heap is flat (±0.2 %) across six
+clear-then-prefill cycles; PSS is flat within noise. The KV reset does not
+accumulate. Peak PSS during real UI turns was 2,403,033–2,423,257 kB
+(LIVE-OBSERVED), unchanged from the Task 5 baseline of ~2.46 GB.
+
+Task 5's note "repeated generation in the same context fails (KV position not
+reset) — must releaseContext/createContext" is now **superseded**: the runtime
+resets the KV itself before each prefill, so the caller does not have to.
+`release()`/`unloadModel()` remain available for lifecycle, not for correctness.

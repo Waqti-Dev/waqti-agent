@@ -279,3 +279,141 @@ Rules:
 - **Result**: **PASS** — full characterization complete
 - **Conclusion**: Task 5 memory/perf baseline established; chat template needed for quality
 - **Next**: Task 6 (chat template, LocalModelProvider integration, UI)
+
+---
+
+## EXP-6A — Literal end-of-turn marker in generated text
+
+- **ID**: EXP-6A
+- **Hypothesis**: the ChatML markers in the formatted prompt were being split
+  into ordinary text, so the model saw an off-distribution prompt and echoed the
+  marker back as literal text
+- **Change**: none yet — diagnosis only. Compared our `llama_tokenize` call
+  against the pinned source (`~/llama.cpp`, `a894dae`).
+- **Build**: Task 6 working tree
+- **Device state**: foreground `com.waqti.agent`, screen on, adj 0
+- **Model**: Qwen2.5-3B Q4_K_M
+- **Parameters**: `generateChat`, `n_predict=64`, temperature 0.7
+- **Observed**: `ok|…|tokens=29|stop=eog|text=…<|im_end|>`. Prompt token ids
+  contained **no** 151644/151645; the marker had become plain text pieces.
+- **Result**: **FAIL** (hypothesis supported)
+- **Conclusion**: `llama_tokenize(..., add_special=false, parse_special=false)`.
+  `src/llama-vocab.cpp` `tokenizer_st_partition()` skips CONTROL/UNKNOWN tokens
+  when `parse_special == false`, so ChatML was tokenized as text.
+- **Next**: EXP-6B.
+
+## EXP-6B — Same call with `add_special=true, parse_special=true`
+
+- **ID**: EXP-6B
+- **Hypothesis**: tokenizing with the flags every llama.cpp example uses
+  (`common_tokenize`) maps the ChatML markers to their real control ids and
+  removes the literal echo
+- **Change**: `llama_tokenize(vocab, prompt, len, /*add_special*/ true,
+  /*parse_special*/ true, …)`
+- **Build**: Task 6 working tree
+- **Device state**: foreground, adj 0
+- **Model**: Qwen2.5-3B Q4_K_M
+- **Parameters**: same as EXP-6A
+- **Observed**: `prompt ids = 151644 872 198 9707 11 19131 6133 26753 13 151645
+  198 151644 77091 198`, `control tokens in prompt = 3`,
+  `add_bos=0 add_eos=0`; result
+  `ok|3272 ms|tokens=29|stop=eog|text=Hello! I'm an artificial intelligence here
+  to assist you…` with **no** leaked marker.
+- **Result**: **PASS**
+- **Conclusion**: root cause confirmed. `add_special=true` is safe here because
+  the GGUF sets `add_bos_token=False` and has no `add_eos_token`, so the flag
+  adds nothing.
+- **Next**: EXP-6C.
+
+## EXP-6C — KV cache reused across calls (state bleed)
+
+- **ID**: EXP-6C
+- **Hypothesis**: because the formatted prompt already contains the whole
+  transcript, prefilling on top of the previous call's KV duplicates history
+- **Change**: none — measured directly.
+- **Build**: Task 6 working tree
+- **Device state**: foreground, adj 0
+- **Model**: Qwen2.5-3B Q4_K_M
+- **Parameters**: identical `generateChat` twice, `n_predict=64`
+- **Observed**: results differed run to run on the same input — state carried
+  between calls; `llama_batch_get_one` starts at `memory->seq_pos_max()+1`.
+- **Result**: **FAIL**
+- **Conclusion**: caller-visible state leak. Fixed by
+  `llama_memory_clear(llama_get_memory(ctx), true)` before each prefill.
+- **Next**: EXP-6D.
+
+## EXP-6D — Determinism after the KV reset (also proves the fix)
+
+- **ID**: EXP-6D
+- **Hypothesis**: with the KV cleared before every prefill, the same request
+  twice produces byte-identical output
+- **Change**: KV reset before each prefill (EXP-6C fix)
+- **Build**: `app-debug.apk` sha256 `375848189d787abf7e9a15336f9ad34e98b241bedce226e2a8b47cfc9785c88f`
+- **Device state**: fresh `am force-stop` then broadcast, adj 0
+- **Model**: Qwen2.5-3B Q4_K_M
+- **Parameters**: `generateChat` "Hello, introduce yourself briefly.",
+  `n_predict=64`, temperature 0.7, seed 0
+- **Observed**: run 1 and run 2 both
+  `ok|3783 ms` / `ok|3678 ms`, `tokens=29`, identical text.
+- **Result**: **PASS**
+- **Conclusion**: no state bleeds between calls. (Timings differ — CPU noise.)
+- **Next**: EXP-6E.
+
+## EXP-6E — `nPredict` as a hard upper bound
+
+- **ID**: EXP-6E
+- **Hypothesis**: the generation loop stops at exactly `n_predict` tokens when
+  the model does not stop on its own, and reports `stop=n_predict`
+- **Change**: none (behaviour under test)
+- **Build**: sha256 `375848189d78…`
+- **Device state**: foreground, adj 0
+- **Model**: Qwen2.5-3B Q4_K_M
+- **Parameters**: `generateChat` "Count from one to fifty…", `n_predict` = 8, 4
+- **Observed**: `tokens=8|stop=n_predict` and `tokens=4|stop=n_predict`.
+- **Result**: **PASS**
+- **Next**: EXP-6F.
+
+## EXP-6F — Conversation continuity through the real UI
+
+- **ID**: EXP-6F
+- **Hypothesis**: earlier turns stated in the Waqti chat UI reach the model, so
+  a follow-up question can be answered from them
+- **Change**: `AgentLoop.run(task, history = emptyList())` +
+  `ChatViewModel` passes the visible turns. Debug receiver unchanged.
+- **Build**: sha256 `375848189d78…`
+- **Device state**: `MainActivity` resumed, screen on, IME driven by
+  `adb shell input text` / tap on Send, adj 0
+- **Model**: Qwen2.5-3B Q4_K_M
+- **Parameters**: temperature 0.7, `n_ctx` 4096, `maxTokens` 256
+- **Observed**: turn 1 "My name is Sara and my favourite number is 42. Just
+  acknowledge." → `tokens=5|stop=eog|text=Acknowledged, Sara.`; turn 2 "What is
+  my name and my favourite number? Answer in one short sentence." →
+  `tokens=13|stop=eog|text=Your name is Sara and your favourite number is 42.`
+  The rendered conversation was read back from the accessibility tree and
+  contains all four bubbles; scan for `<|`, `|>`, `im_start`, `im_end`, `\x`
+  returned **NONE**. Passcode variant reproduced twice
+  (`7391` → `Acknowledged.` → `Repeat the secret passcode exactly.` → `7391`).
+- **Result**: **PASS**
+- **Conclusion**: the history reaches the model and the model uses it. Before
+  this change the turn-5 prompt contained only the newest user message.
+- **Next**: none — Task 6 complete.
+
+## EXP-6G — Task 5 `generate` regression after the Task 6 native changes
+
+- **ID**: EXP-6G
+- **Hypothesis**: the plain (non-template) `generate` path still honours
+  `n_predict` and is unchanged by the tokenize/KV changes
+- **Change**: none (regression check)
+- **Build**: sha256 `375848189d78…`
+- **Device state**: foreground, adj 0
+- **Model**: Qwen2.5-3B Q4_K_M
+- **Parameters**: `generate` "CapitalOfFranceIs", `n_predict` = 12 and 5,
+  temperature 0.0
+- **Observed**: `ok|1541 ms|tokens=12|stop=n_predict|text= = "Paris"` and
+  `ok|840 ms|tokens=5|stop=n_predict|text= = "Paris"`.
+- **Result**: **PASS**
+- **Note**: an earlier attempt reported `tokens=128` for `--ei n_predict 12`.
+  That was an ADB quoting artefact — `--es prompt "The capital of France is"`
+  makes the remote shell consume the following flags. Space-free prompts are
+  required for this harness. Not a runtime defect.
+- **Next**: none.
