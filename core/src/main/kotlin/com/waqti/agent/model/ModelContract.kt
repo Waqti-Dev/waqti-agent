@@ -34,8 +34,17 @@ sealed interface ModelResponse {
     /** The model produced a final answer. */
     data class Text(val text: String) : ModelResponse
 
-    /** The model wants tools executed before it can answer. */
-    data class Calls(val calls: List<ToolCall>) : ModelResponse
+    /**
+     * The model wants tools executed before it can answer.
+     *
+     * [assistantContent] is any prose the model emitted in the same turn before
+     * asking for the calls. It defaults to empty so existing callers and tests
+     * that only care about the calls are unaffected.
+     */
+    data class Calls(
+        val calls: List<ToolCall>,
+        val assistantContent: String = ""
+    ) : ModelResponse
 }
 
 data class ModelRequest(

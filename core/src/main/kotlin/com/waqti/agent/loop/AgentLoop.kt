@@ -33,6 +33,9 @@ Rules:
 - Never invent tool results. If a tool failed, say that it failed and why.
 - Keep the final answer short and in the user's language."""
 
+/** Upper bound on re-sent prior turns, so a long chat cannot outgrow the context window. */
+const val MAX_HISTORY_MESSAGES: Int = 24
+
 /**
  * The agent workflow: model decides, tools execute, results flow back, repeat
  * until a final answer or an explicit failure.
@@ -48,7 +51,14 @@ class AgentLoop(
     private val onEvent: (AgentEvent) -> Unit = {}
 ) {
 
-    suspend fun run(task: String): AgentOutcome {
+    /**
+     * @param history prior turns of the same conversation, oldest first, excluding
+     *   the system prompt and excluding [task] itself. Defaults to empty so every
+     *   existing caller (and the deterministic tests) keep the previous
+     *   single-turn behaviour. A chat UI passes the turns it is already showing so
+     *   the model can actually refer back to them.
+     */
+    suspend fun run(task: String, history: List<ChatMessage> = emptyList()): AgentOutcome {
         val trimmed = task.trim()
         if (trimmed.isEmpty()) {
             val message = "Empty task: nothing to do"
@@ -60,10 +70,10 @@ class AgentLoop(
         val traces = ArrayList<ToolTrace>()
         emit(AgentEvent.Started(trimmed, model.label))
 
-        val messages = mutableListOf(
-            ChatMessage(Role.SYSTEM, systemPrompt),
-            ChatMessage(Role.USER, trimmed)
-        )
+        val messages = mutableListOf<ChatMessage>()
+        messages += ChatMessage(Role.SYSTEM, systemPrompt)
+        messages += priorTurns(history)
+        messages += ChatMessage(Role.USER, trimmed)
 
         val executor = Executors.newCachedThreadPool { runnable ->
             Thread(runnable, "waqti-tool").apply { isDaemon = true }
@@ -107,7 +117,11 @@ class AgentLoop(
 
                     is ModelResponse.Calls -> {
                         messages.add(
-                            ChatMessage(Role.ASSISTANT, content = "", toolCalls = response.calls)
+                            ChatMessage(
+                                role = Role.ASSISTANT,
+                                content = response.assistantContent,
+                                toolCalls = response.calls
+                            )
                         )
                         for (call in response.calls) {
                             currentCoroutineContext().ensureActive()
@@ -171,6 +185,18 @@ class AgentLoop(
             }
         }
     }
+
+    /**
+     * Keeps only real conversation turns: the system prompt is added by [run] and
+     * TOOL turns belong to an earlier step's tool exchange, so re-sending them
+     * would corrupt the transcript. Blank text is dropped, and the oldest turns
+     * are trimmed past [MAX_HISTORY_MESSAGES] so a long chat cannot outgrow the
+     * model's context window.
+     */
+    private fun priorTurns(history: List<ChatMessage>): List<ChatMessage> =
+        history.filter { it.role == Role.USER || it.role == Role.ASSISTANT }
+            .filter { it.content.isNotBlank() }
+            .takeLast(MAX_HISTORY_MESSAGES)
 
     private fun emit(event: AgentEvent) {
         try {

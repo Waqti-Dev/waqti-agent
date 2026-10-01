@@ -7,7 +7,14 @@ import kotlinx.coroutines.withContext
 
 /**
  * Local [ModelProvider] that uses [LocalInferenceRuntime] for on-device inference.
- * Maps raw generated text to [ModelResponse.Text].
+ * Uses the model's embedded chat template for proper conversation formatting.
+ *
+ * Conversation state lives entirely in [ModelRequest.messages]: the whole
+ * transcript is formatted and prefilled on every call and the KV cache is reset
+ * before each prefill, so what the model conditions on is exactly the transcript
+ * it was handed. A shared conversation passes the earlier turns; a fresh
+ * conversation passes only its own first message — there is no second, hidden
+ * carry-over.
  *
  * The agent loop already handles [ModelResponse.Text] and [ModelResponse.Calls];
  * this provider produces only Text responses.
@@ -32,14 +39,14 @@ class LocalModelProvider(
         // Ensure model and context are initialized
         ensureInitialized()
 
-        // Convert chat messages to a simple prompt string
-        // For now, use a basic concatenation. Chat template support can be added later.
-        val prompt = buildPrompt(request.messages)
-
-        // Generate
+        // The full transcript AND the tool definitions go to the model's own
+        // chat template; nPredict is a hard upper bound on the reply, never a
+        // target. Tool definitions come straight from the request, so
+        // ToolRegistry stays the single source of truth.
         val generated = try {
-            runtime.generate(
-                prompt = prompt,
+            runtime.generateChat(
+                messages = request.messages,
+                tools = request.tools,
                 maxTokens = maxTokens,
                 temperature = temperature,
                 topK = topK,
@@ -52,7 +59,29 @@ class LocalModelProvider(
             return ModelResponse.Text("Error: ${e.message}")
         }
 
-        return ModelResponse.Text(generated)
+        // Tool calls win over prose: the loop must execute them before it can
+        // produce a final answer. Text alongside a call is kept as the call's
+        // preamble rather than silently dropped.
+        if (generated.toolCalls.isNotEmpty()) {
+            // Some chat formats (Qwen2.5 among them) have no tool-call id at all.
+            // An empty id would make several calls in one turn indistinguishable
+            // once their results come back, so a positional id is used when the
+            // model supplied none. The model's own id is never overwritten.
+            val calls = generated.toolCalls.mapIndexed { index, call ->
+                ToolCall(
+                    id = call.id.ifBlank { "call_${index + 1}" },
+                    name = call.name,
+                    arguments = call.arguments
+                )
+            }
+            val preamble = if (generated.text.isBlank()) "" else generated.text
+            return ModelResponse.Calls(
+                calls = calls,
+                assistantContent = preamble
+            )
+        }
+
+        return ModelResponse.Text(generated.text)
     }
 
     private suspend fun ensureInitialized() {
@@ -65,20 +94,6 @@ class LocalModelProvider(
         runtime.createContext(nCtx, nBatch)
 
         initialized = true
-    }
-
-    private fun buildPrompt(messages: List<ChatMessage>): String {
-        val sb = StringBuilder()
-        for (msg in messages) {
-            when (msg.role) {
-                Role.SYSTEM -> sb.append("System: ${msg.content}\n\n")
-                Role.USER -> sb.append("User: ${msg.content}\n\n")
-                Role.ASSISTANT -> sb.append("Assistant: ${msg.content}\n\n")
-                Role.TOOL -> sb.append("Tool result (${msg.toolName}): ${msg.content}\n\n")
-            }
-        }
-        sb.append("Assistant: ")
-        return sb.toString()
     }
 
     /**
