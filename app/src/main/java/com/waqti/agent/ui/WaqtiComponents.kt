@@ -203,6 +203,7 @@ fun statusWord(model: ModelUiState, stage: RunStage): String = when {
     stage == RunStage.RUNNING_TOOL -> "Using a tool"
     stage == RunStage.GENERATING || stage == RunStage.FINISHING -> "Working"
     model is ModelUiState.Ready -> "Ready"
+    model is ModelUiState.Invalid -> "Not a model"
     else -> "No model"
 }
 
@@ -218,6 +219,7 @@ fun statusDescription(model: ModelUiState, stage: RunStage): String = when (mode
     }
     is ModelUiState.Ready ->
         if (stage == RunStage.IDLE) "${model.fileName}, ready" else "${model.fileName}, ${statusWord(model, stage)}"
+    is ModelUiState.Invalid -> "${model.fileName} is not a GGUF model"
 }
 
 /** Small uppercase label used to title a region or a group inside the interface. */

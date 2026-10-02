@@ -284,6 +284,14 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     failImport("The model file was not copied completely. Try importing it again.")
                     return@launch
                 }
+                // Validate the staged copy before it is ever renamed into place or
+                // registered as the active model, so an empty or renamed text file
+                // cannot be reported as ready.
+                if (!hasGgufMagic(partial)) {
+                    partial.delete()
+                    failImport("That file is not a valid GGUF model. Choose a real .gguf model file.")
+                    return@launch
+                }
                 if (partial.renameTo(target).not()) {
                     partial.copyTo(target, overwrite = true)
                     partial.delete()
@@ -351,10 +359,11 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             return ModelUiState.Importing(progress.fileName, progress.copiedBytes, progress.totalBytes)
         }
         val file = File(resolveLocalModelPath())
-        return if (file.isFile) {
-            ModelUiState.Ready(file.name, file.length())
-        } else {
-            ModelUiState.Absent
+        return when {
+            !file.isFile -> ModelUiState.Absent
+            hasGgufMagic(file) -> ModelUiState.Ready(file.name, file.length())
+            // A file is there but is not a GGUF: say so rather than claim it is ready.
+            else -> ModelUiState.Invalid(file.name, file.length())
         }
     }
 
@@ -442,6 +451,28 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         val configured = settings.model.trim()
         val filesDir = getApplication<Application>().filesDir
         return File(configured).let { if (it.isAbsolute) it.absolutePath else File(filesDir, configured).absolutePath }
+    }
+
+    /**
+     * A GGUF model starts with the four ASCII bytes "GGUF". Reading only those
+     * four bytes is the smallest honest test that rejects an empty file or a text
+     * file renamed to .gguf, without duplicating llama.cpp's model parser. A file
+     * shorter than four bytes cannot match.
+     */
+    private fun hasGgufMagic(file: File): Boolean {
+        if (!file.isFile || file.length() < 4L) return false
+        return runCatching {
+            file.inputStream().use { input ->
+                val magic = ByteArray(4)
+                var read = 0
+                while (read < 4) {
+                    val n = input.read(magic, read, 4 - read)
+                    if (n <= 0) break
+                    read += n
+                }
+                read == 4 && String(magic, Charsets.US_ASCII) == "GGUF"
+            }
+        }.getOrDefault(false)
     }
 
     // --- helpers ------------------------------------------------------------

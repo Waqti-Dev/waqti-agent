@@ -210,6 +210,7 @@ private fun WaqtiHeader(gutter: Dp, model: ModelUiState, stage: RunStage, onOpen
                             is ModelUiState.Ready -> model.fileName
                             is ModelUiState.Importing ->
                                 if (model.fileName.isBlank()) "Importing a model" else model.fileName
+                            is ModelUiState.Invalid -> "${model.fileName} (not a GGUF)"
                             ModelUiState.Absent -> "No model on this device"
                         },
                         style = MaterialTheme.typography.labelMedium,

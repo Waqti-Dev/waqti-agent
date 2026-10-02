@@ -324,6 +324,16 @@ private fun ModelStatusBlock(
                     modifier = Modifier.fillMaxWidth()
                 )
             }
+
+            is ModelUiState.Invalid -> {
+                Text(
+                    text = "${model.fileName} is not a valid GGUF model, so Waqti cannot " +
+                        "load it. Choose a different file.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                WaqtiPrimaryButton(text = "Choose a GGUF file", onClick = onImport)
+            }
         }
 
         if (!importError.isNullOrBlank()) {

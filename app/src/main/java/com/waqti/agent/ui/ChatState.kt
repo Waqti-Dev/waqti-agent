@@ -40,7 +40,8 @@ data class SettingsDraft(
  *
  * Every value is read from real application state: [Absent] means no GGUF exists
  * at the resolved path, [Importing] means a copy is genuinely running, [Ready]
- * means the file is really there with the size really reported. Nothing here is
+ * means the file is really there with the size really reported, and [Invalid]
+ * means a file is present but is not a readable GGUF model. Nothing here is
  * inferred from a successful request or a previous run.
  */
 sealed interface ModelUiState {
@@ -54,6 +55,13 @@ sealed interface ModelUiState {
     ) : ModelUiState
 
     data class Ready(val fileName: String, val sizeBytes: Long) : ModelUiState
+
+    /**
+     * A file exists at the resolved path but does not begin with the GGUF magic
+     * bytes, so the runtime cannot load it. Reported instead of [Ready] so the
+     * interface never presents an unusable file as a working model.
+     */
+    data class Invalid(val fileName: String, val sizeBytes: Long) : ModelUiState
 }
 
 /**

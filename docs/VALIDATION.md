@@ -274,3 +274,104 @@ Measurements taken from `logcat` (`waqti-native` tag), 3B Q4_K_M:
 
 Device state left clean: `accelerometer_rotation` back to `1`, Waqti force-stopped,
 Termux foreground, no model file moved or deleted.
+
+## CP5 — model import validation (2026-10-02, LIVE-OBSERVED)
+
+Device `25053RT47C` (SM8735, 8 cores), serial `192.168.1.6:38383`, Android 15.
+All steps were driven through the real app and the real SAF picker
+(`com.android.fileexplorer.picker.PickMainNavigatorActivity`, the device's default
+`ACTION_OPEN_DOCUMENT` handler). No debug receiver was used.
+
+### Defect reproduced before the fix
+
+Two invalid fixtures were staged on the device and picked through the real picker:
+
+| fixture | bytes | first bytes |
+|---|---|---|
+| `fake-empty.gguf` | 0 | (none) |
+| `fake-text.gguf` | 67 | `this` (`74 68 69 73`) |
+
+`importModel()` validated only `filename.endsWith(".gguf")`. Observed result for
+**both** files, with no change to any other code:
+
+- the file was copied into `files/` and renamed into place;
+- `waqti_settings.xml` was updated to that name;
+- the model sheet reported **`Ready`** with `Size 0 B` / `Size 67 B`.
+
+`currentModelState()` reported `Ready` for any existing file, so a 0-byte file was
+presented to the user as a working model.
+
+### Fix
+
+`app/src/main/java/com/waqti/agent/ui/ChatViewModel.kt`
+
+- `hasGgufMagic(file)` reads the first four bytes and requires ASCII `GGUF`.
+  Deliberately not a GGUF parser and does not duplicate llama.cpp's loader; a
+  file shorter than four bytes cannot match.
+- `importModel()` validates the **staged** `.part` copy *after* the copy and
+  *before* it is renamed into place or written to settings. On mismatch the
+  staged file is deleted and the import fails, so nothing is added to the model
+  registry and the previously active model is left untouched.
+- `currentModelState()` projects `ModelUiState.Invalid` instead of `Ready` when a
+  file exists but fails the magic check.
+
+`app/src/main/java/com/waqti/agent/ui/ChatState.kt` adds `ModelUiState.Invalid`.
+`ChatScreen.kt`, `WaqtiComponents.kt` and `ModelSheet.kt` render it; the header
+shows `<name> (not a GGUF)`, the status word is `Not a model`, and the sheet
+offers `Choose a GGUF file`. `canRunTask` is unchanged and still requires `Ready`,
+so an invalid file can never be used for a run.
+
+### Verified after the fix
+
+| Check | Result |
+|---|---|
+| Import 0-byte `fake-empty.gguf` | **PASS** — rejected |
+| Import 67-byte `fake-text.gguf` | **PASS** — rejected |
+| Error shown to user | **PASS** — *"That file is not a valid GGUF model. Choose a real .gguf model file."* |
+| Nothing added to registry | **PASS** — `files/` unchanged, no `.part` left behind |
+| Active model preserved | **PASS** — `settings.model` unchanged across both failures |
+| Existing invalid file reported honestly | **PASS** — 67-byte file shows *"...is not a valid GGUF model, so Waqti cannot load it."* instead of `Ready` |
+| Import valid GGUF | **PASS** — `qwen2.5-0.5b-instruct-q4_k_m.gguf`, 491,400,032 B copied to `files/` |
+| State after valid import | **PASS** — sheet `Ready`, `File qwen2.5-0.5b-instruct-q4_k_m.gguf`, `Size 491 MB` |
+| Runtime loads imported model | **PASS** — `loading model: .../files/qwen2.5-0.5b-instruct-q4_k_m.gguf (491400032 bytes)`; `loaded meta data with 26 key-value pairs and 291 tensors ... GGUF V3` |
+| Inference from imported model | **PASS** — `generation done: ok|7696 ms|tokens=6|stop=eog|tool_calls_b64=W10=|text=Day in one short sentence.` |
+
+The imported 0.5B was then replaced by the previously validated 3B through the
+app's own settings sheet, and all CP5 fixtures were deleted from the device.
+
+### Regression check on the fixed build
+
+Same APK re-validated for the core path with `qwen2.5-3b-OFFICIAL-Q4_K_M.gguf`:
+
+- `generation done: ok|55070 ms|tokens=25|stop=eog|text=` with
+  `tool call name=SearchFiles id= arguments={"query": "Sprint", "path": "."}`
+- tool executed for real: `SearchFiles` `39 ms` `matches: 1 in 1 file(s)`
+- `generation done: ok|67354 ms|tokens=14|stop=eog|tool_calls_b64=W10=|text=Found "Sprint" in docs/plan.md: # Sprint plan`
+
+### Performance measured while validating (3B Q4_K_M, LIVE-OBSERVED)
+
+Taken from per-token `waqti-native` log timestamps, **not** from round wall time:
+
+- model load to first generation (mmap, `n_ctx=4096`): 13:11:25.861 -> 13:11:27.725, about **1.86 s**
+- decode interval round 2: ten consecutive tokens, 0.139-0.154 s apart, mean **about 0.142 s/token, about 7 tok/s**
+- the remainder of each round is **prompt evaluation**, about 51 s (round 1) and
+  about 65 s (round 2). This build logs no explicit prefill/decode split, so the
+  split is derived from log timestamps, not from a runtime-internal timer.
+- first-token latency: **UNKNOWN** — no first-token timer exists in this build
+- peak memory for this run: **UNKNOWN** — not sampled during this checkpoint
+
+Earlier in the same session, rounds of 131,374 ms / 13 tok and 136,732 ms / 32 tok
+were observed. Those are consistent with the split above: the anomaly is prompt
+evaluation, not decode. Root cause is not established and was not investigated --
+performance work is out of scope for this checkpoint.
+
+### Device state left clean
+
+`accelerometer_rotation` restored to `1`, CP5 fixtures removed from
+`/sdcard/Download/` and `/sdcard/Download/models/`, `files/` restored to the two
+validated models, Waqti force-stopped, Termux foreground.
+
+### Build / tests
+
+`./gradlew :core:test :app:testDebugUnitTest :app:assembleDebug` -- BUILD SUCCESSFUL.
+core 92 tests, 0 failures, 1 skipped; app 14 tests, 0 failures.
